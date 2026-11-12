@@ -1,0 +1,85 @@
+#!/bin/bash
+# 把 Mac 上当前共享的窗口交给人。用法：windowshare-show --reason "<原因>" [--timeout <30-1800，默认 300>]
+# 退出码：0 done，3 cancelled，4 timeout，5 no_window，2 其他错误
+# 还没有共享窗口时先共享：WindowShareHost --app "<App 名>" --interact &（见 skills/windowshare-show/SKILL.md「一条龙」）
+set -euo pipefail
+
+reason="" timeout=300
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reason) [ $# -ge 2 ] || { echo "缺少 --reason 的值" >&2; exit 2; }; reason=$2; shift 2 ;;
+    --timeout) [ $# -ge 2 ] || { echo "缺少 --timeout 的值" >&2; exit 2; }; timeout=$2; shift 2 ;;
+    *) echo "用法：windowshare-show --reason \"<原因>\" [--timeout <秒>]" >&2; exit 2 ;;
+  esac
+done
+[ -n "$reason" ] || { echo "必须提供 --reason" >&2; exit 2; }
+[[ "$timeout" =~ ^[0-9]{2,4}$ ]] && [ "$((10#$timeout))" -ge 30 ] && [ "$((10#$timeout))" -le 1800 ] \
+  || { echo "--timeout 必须是 30–1800 的整数" >&2; exit 2; }
+timeout=$((10#$timeout))
+
+cfg=${WINDOWSHARE_AGENT_JSON:-"$HOME/Library/Application Support/WindowShare/agent.json"}
+[ -r "$cfg" ] || { echo "WindowShare 未运行（找不到 agent.json）" >&2; exit 2; }
+
+# 输出三行：port、token、entry。登记者已退出（例如 CLI 共享被 SIGKILL）时，改用它接管过的、仍在运行的 host
+# （"displaced"，最新的在前），与 status（AgentFile.current）一致。
+parsed=$(python3 -I -c 'import json,os,sys
+def alive(e):
+    try: p=int(e["pid"]); os.kill(p, 0) if p > 0 else 1/0; return True
+    except PermissionError: return True
+    except Exception: return False
+d=json.load(open(sys.argv[1]))
+if "pid" in d and not alive(d): d=next((e for e in d.get("displaced", []) if alive(e)), d)
+print(int(d["port"]));print(str(d["token"]));print(str(d["entry"]))' "$cfg" 2>/dev/null) || parsed=""
+{ IFS= read -r port; IFS= read -r token; IFS= read -r entry; } <<<"$parsed" || true
+[[ "${port:-}" =~ ^[0-9]+$ ]] && [[ "${token:-}" =~ ^[A-Za-z0-9]+$ ]] && [ -n "${entry:-}" ] \
+  || { echo "agent.json 无法解析" >&2; exit 2; }
+
+out=$(mktemp); trap 'rm -f "$out"' EXIT
+base="http://127.0.0.1:$port"
+
+# call <curl 额外参数...>：token 经 stdin 的 --config 传入，不出现在任何进程的命令行。
+# 结果：HTTP 状态码在 $code，正文在 $out
+call() {
+  code=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+    | curl -q --noproxy '*' -sS --max-time 10 --config - -o "$out" -w '%{http_code}' "$@" 2>/dev/null) || code=000
+}
+# field <name>：从 $out 读 JSON 字段，缺失则输出空
+field() { python3 -I -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+except Exception: print("")' "$out" "$1"; }
+
+body=$(python3 -I -c 'import json,sys
+print(json.dumps({"reason":sys.argv[1],"timeout_sec":int(sys.argv[2])},ensure_ascii=False))' "$reason" "$timeout")
+call -X POST -H 'Content-Type: application/json' --data-binary "$body" "$base/agent/request"
+
+case "$code" in
+  201) ;;
+  000) echo "WindowShare 未运行（无法连接 127.0.0.1:${port}）" >&2; exit 2 ;;
+  401) echo "token 错误（agent.json 可能已过期，host 重启后会重新生成）" >&2; exit 2 ;;
+  409)
+    case "$(field error)" in
+      no_window) echo "请先共享窗口：WindowShareHost --app \"<App 名>\" --interact，或在 Mac 菜单栏选择窗口"; exit 5 ;;
+      busy) echo "已有进行中的请求" >&2; exit 2 ;;
+      *) echo "请求被拒绝（409）" >&2; exit 2 ;;
+    esac ;;
+  *) echo "请求失败（HTTP ${code}）" >&2; exit 2 ;;
+esac
+
+id=$(field id)
+[[ "$id" =~ ^[A-Za-z0-9-]+$ ]] || { echo "host 返回的 id 无效" >&2; exit 2; }
+# 本次共享的链接（…/w/<共享 id>）；共享结束即失效，agent.json 里的根地址不能进入共享。
+link=$(field entry)
+[[ "$link" =~ ^https?://[^[:space:]]+/w/[A-Za-z0-9-]+$ ]] || { echo "host 返回的共享链接无效" >&2; exit 2; }
+echo "请在手机打开：$link"
+
+while :; do
+  call "$base/agent/request/$id"
+  [ "$code" = 200 ] || { echo "轮询失败（HTTP ${code}）" >&2; exit 2; }
+  case "$(field status)" in
+    pending) sleep 2 ;;
+    done) exit 0 ;;
+    cancelled) exit 3 ;;
+    timeout) exit 4 ;;
+    *) echo "host 返回了未知状态" >&2; exit 2 ;;
+  esac
+done

@@ -1,0 +1,7 @@
+#!/bin/bash
+# WindowShare 命令行入口：windowshare list [--json] | status [--json] | --app "<App 名>" [--interact] …（见 README.md「Command line」/ README.zh-CN.md「命令行启动」）
+# 找 app：$WINDOWSHARE_APP，否则仓库里的 build/WindowShareHost.app，否则 /Applications/WindowShareHost.app。
+for app in "${WINDOWSHARE_APP:-}" "$(dirname "$0")/../build/WindowShareHost.app" /Applications/WindowShareHost.app; do
+  [ -n "$app" ] && [ -x "$app/Contents/MacOS/WindowShareHost" ] && exec "$app/Contents/MacOS/WindowShareHost" "$@"
+done
+echo "找不到 WindowShareHost.app（先构建，或设 WINDOWSHARE_APP）" >&2; exit 2

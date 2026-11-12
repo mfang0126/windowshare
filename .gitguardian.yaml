@@ -1,0 +1,5 @@
+secret:
+  ignored_matches:
+  - match: 8981b0dff1a5ccf5a99fb5be82599c62eaa35cd12fd507a9c8c9b5565b0bedc6
+    name: Generic High Entropy Secret - commit://staged/evidence/2026-10-24-cli-auth/desktop-20261023T160103.803826Z.json
+version: 2

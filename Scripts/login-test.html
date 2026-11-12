@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>ws-login-test</title>
+<meta name="viewport" content="width=device-width">
+<!-- M1-5 local test login page: nothing leaves the page; only the username and the password length are shown. -->
+<style>body{font:20px system-ui;margin:40px;max-width:420px}input,button{font:inherit;width:100%;margin:8px 0;padding:8px}</style>
+<form id="f"><label>用户名<input id="u" autocomplete="off"></label><label>密码<input id="p" type="password" autocomplete="new-password"></label><button>登录</button></form>
+<p id="r"></p>
+<script>f.onsubmit=e=>{e.preventDefault();r.textContent=`已提交：用户名「${u.value}」，密码 ${p.value.length} 位`;p.value='';};</script>

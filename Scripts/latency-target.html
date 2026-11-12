@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><title>ws-latency-target</title>
+<style>html,body{margin:0;height:100%;background:#000}</style>
+<!-- Latency baseline target: every click flips the whole page black/white. Share this window, then run Scripts/latency-run.mjs. -->
+<body><script>let on=false;addEventListener('mousedown',()=>{on=!on;document.body.style.background=on?'#fff':'#000';});</script></body>
