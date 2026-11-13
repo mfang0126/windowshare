@@ -46,7 +46,14 @@ vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);c
  timers.clear();ws.onclose({code:1001});assert.match(el('state').textContent,/共享已结束/,'host exit left: '+el('state').textContent);assert.doesNotMatch(el('detail').textContent,/控制权/);
  assert.equal(timers.size,0);events.online();assert.equal(timers.size,0);
  ws=await join();timers.clear();ws.onclose({code:1006});assert([...timers.values()].some(x=>x.ms===1500));
- console.log('PASS automatic View recovery, background return, no input/lease replay, explicit stop, ended/bare link stops, lease granted note, host exit ends share');
+ // Share ends inside the host (limit, window closed): /meta fails (401) just before the 1001; the 1001 still wins,
+ // and without a 1001 the poll failure still recovers after 1 s.
+ const okFetch=c.fetch,fail=async()=>({ok:false,status:401,json:async()=>({})});
+ const pollFails=async()=>{const ws=await join();const poll=[...timers.values()].find(x=>x.ms===1500);c.fetch=fail;timers.clear();poll.fn();await flush();c.fetch=okFetch;return ws};
+ ws=await pollFails();assert.doesNotMatch(el('state').textContent,/恢复|连接 View/);ws.onclose({code:1001});
+ assert.match(el('state').textContent,/共享已结束/,'poll failure hid host end: '+el('state').textContent);assert.equal(timers.size,0);
+ ws=await pollFails();const grace=[...timers.values()].find(x=>x.ms===1000);assert(grace);grace.fn();assert([...timers.values()].some(x=>x.ms===1500));
+ console.log('PASS automatic View recovery, background return, no input/lease replay, explicit stop, ended/bare link stops, lease granted note, host exit ends share, poll failure does not hide host end');
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
 with tempfile.TemporaryDirectory() as directory:

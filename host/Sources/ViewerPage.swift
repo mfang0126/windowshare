@@ -188,7 +188,9 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
       const m=await api(base()+'/meta',undefined,AbortSignal.timeout(5000));if(version!==epoch)return;
       if(m.window_generation!==binding.window_generation)throw Error('窗口已改变，请打开当前共享入口');
       timer=setTimeout(()=>monitor(version),1500);
-    }catch(e){if(version===epoch)recover(e.message);}
+    // When the share ends this poll can fail (401) just before the control socket's close 1001 arrives: while that
+    // socket is open, give it 1 s to say 「共享已结束」 instead of recovering against a host that is exiting.
+    }catch(e){if(version===epoch){if(socket?.readyState===1)timer=setTimeout(()=>{if(version===epoch)recover(e.message);},1000);else recover(e.message);}}
   }
   function watch(){clear('View · 连接中');const version=epoch;el('close').disabled=false;el('retry').disabled=false;stream();monitor(version);connect(version);}
   let sentText=null;
