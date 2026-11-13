@@ -328,6 +328,9 @@ final class PairingSession {
             return context
         }
     }
+    /// True once the share this viewer authenticated for is over (window cleared or replaced), as opposed to a
+    /// dropped connection or an expired session of a share that is still running.
+    func shareEnded(_ context: Context) -> Bool { locked { binding != context.binding } }
     func disconnect(_ context: Context) {
         locked {
             guard let connection = connections[context.connectionID], connection.context == context else { return }

@@ -96,9 +96,10 @@ final class ControlServer {
         self.timer = timer; timer.resume()
     }
     /// Called only when the process is about to exit: tell each viewer the share ended (WebSocket close 1001, going away)
-    /// so the phone shows 「共享已结束」 instead of retrying a dead host. Waits at most 0.5 s. Call it before
-    /// `revokeWindow`, which cancels the sockets at once.
+    /// so the phone shows 「共享已结束」 instead of retrying a dead host. Waits at most 0.5 s, also for the 1001 that
+    /// `close` already sent when the share ended inside `PairingSession` (12-hour limit, window closed).
     func stop() {
+        let deadline = DispatchTime.now() + 0.5
         let sent = DispatchGroup()
         sent.enter()
         queue.async {
@@ -114,7 +115,8 @@ final class ControlServer {
             }
             sent.leave()
         }
-        _ = sent.wait(timeout: .now() + 0.5)
+        _ = sent.wait(timeout: deadline)
+        _ = ending.wait(timeout: deadline)
     }
     private func accept(_ connection: NWConnection) {
         guard clients.count < 32, configuration.acceptsPeer(connection.endpoint) else { connection.cancel(); return }
@@ -131,9 +133,28 @@ final class ControlServer {
         }
         connection.start(queue: queue)
     }
+    /// 1001 frames still in flight; `stop()` waits for them before the process exits.
+    private let ending = DispatchGroup()
     private func close(_ client: Client) {
         guard clients.removeValue(forKey: ObjectIdentifier(client.connection)) != nil else { return }
-        client.connection.cancel()
+        if let context = client.context, identity.shareEnded(context) {
+            // The share this viewer watched is over (limit, window closed, 「完成」, menu stop): say so with close 1001
+            // before dropping the transport. Frames and input already stopped when PairingSession cleared the window,
+            // and the client is out of `clients`, so nothing more is read from or written to it but this frame.
+            ending.enter()
+            var finished = false
+            let finish = { [ending] in
+                guard !finished else { return }
+                finished = true; client.connection.cancel(); ending.leave()
+            }
+            let metadata = NWProtocolWebSocket.Metadata(opcode: .close)
+            metadata.closeCode = .protocolCode(.goingAway)
+            client.connection.send(content: nil, contentContext: .init(identifier: "close", metadata: [metadata]), isComplete: true,
+                                   completion: .contentProcessed { _ in finish() })
+            queue.asyncAfter(deadline: .now() + 0.5, execute: finish)
+        } else {
+            client.connection.cancel()
+        }
         // Fence transport now; revoke authority on the next queue turn.
         if let context = client.context { queue.async { self.identity.disconnect(context) } }
     }
@@ -175,7 +196,9 @@ final class ControlServer {
         guard let context = client.context else {
             guard exact(["t", "ticket", "resource"]), type == "auth", let ticket = object["ticket"] as? String,
                   let resource = object["resource"] as? String,
-                  let context = identity.authenticate(ticket: ticket, resource: resource, cancel: { client.connection.cancel() }) else { close(client); return }
+                  let context = identity.authenticate(ticket: ticket, resource: resource, cancel: { [weak self] in
+                      // Through `close`, so a share that ended in PairingSession tells the viewer (1001) first.
+                      self?.queue.async { self?.close(client) } }) else { close(client); return }
             client.context = context
             if let state = identity.state(context) { reply(state, client) } else { close(client) }
             return
