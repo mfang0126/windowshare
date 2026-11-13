@@ -31,6 +31,7 @@ import AppKit
 final class StubApp { var terminations = 0; func terminate(_ sender: Any?) { terminations += 1 }; func window(withWindowNumber: Int) -> NSWindow? { nil } }
 let NSApp = StubApp()
 final class StubCapture { func stopCapture() async {} }
+final class StubControl { func stop() {} }
 final class Controller {
     let identity: PairingSession
     var capture: StubCapture?
@@ -38,6 +39,7 @@ final class Controller {
     var targetLabel = ""
     var lastEnded: PairingSession.Binding?
     var autoShare: Int? = nil
+    var control: StubControl? = StubControl()
     func stopControl() {}
     func rebuildMenu() {}
     init(_ s: PairingSession) { identity = s; OBSERVE() }

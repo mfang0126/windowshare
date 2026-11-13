@@ -95,12 +95,26 @@ final class ControlServer {
         timer.setEventHandler { [weak self] in self?.tick() }
         self.timer = timer; timer.resume()
     }
+    /// Called only when the process is about to exit: tell each viewer the share ended (WebSocket close 1001, going away)
+    /// so the phone shows 「共享已结束」 instead of retrying a dead host. Waits at most 0.5 s. Call it before
+    /// `revokeWindow`, which cancels the sockets at once.
     func stop() {
+        let sent = DispatchGroup()
+        sent.enter()
         queue.async {
             self.listener?.cancel(); self.listener = nil
             self.timer?.cancel(); self.timer = nil
-            for client in Array(self.clients.values) { self.close(client) }
+            for client in Array(self.clients.values) {
+                guard client.context != nil else { self.close(client); continue }
+                sent.enter()
+                let metadata = NWProtocolWebSocket.Metadata(opcode: .close)
+                metadata.closeCode = .protocolCode(.goingAway)
+                client.connection.send(content: nil, contentContext: .init(identifier: "close", metadata: [metadata]), isComplete: true,
+                                       completion: .contentProcessed { [weak self] _ in self?.close(client); sent.leave() })
+            }
+            sent.leave()
         }
+        _ = sent.wait(timeout: .now() + 0.5)
     }
     private func accept(_ connection: NWConnection) {
         guard clients.count < 32, configuration.acceptsPeer(connection.endpoint) else { connection.cancel(); return }

@@ -11,12 +11,12 @@ js = js.replace('  openView().catch(e=>recover(e.message));', '''
 ''')
 harness = r'''
 const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
-const elements=new Map(), timers=new Map(),events={},sent=[];let next=0;
+const elements=new Map(), timers=new Map(),events={},sent=[],sockets=[];let next=0;
 function el(id){if(!elements.has(id))elements.set(id,{value:'',style:{},classList:{toggle(){}},setAttribute(){},removeAttribute(){},addEventListener(){},hasPointerCapture(){return false}});return elements.get(id)}
 const c={console,AbortSignal,TextEncoder,URL:{revokeObjectURL(){}},crypto:require('node:crypto').webcrypto,
  document:{hidden:false,getElementById:el,querySelectorAll:()=>[],addEventListener:(k,v)=>events[k]=v},
  window:{addEventListener:(k,v)=>events[k]=v},location:{pathname:'/w/w',protocol:'http:',hostname:'localhost',port:'18777'},history:{replaceState(){}},navigator:{},
- WebSocket:class{static OPEN=1;constructor(){this.readyState=1}send(x){sent.push(JSON.parse(x))}close(){}},
+ WebSocket:class{static OPEN=1;constructor(){this.readyState=1;sockets.push(this)}send(x){sent.push(JSON.parse(x))}close(){}},
  setTimeout:(fn,ms)=>{timers.set(++next,{fn,ms});return next},clearTimeout:id=>timers.delete(id),setInterval:()=>0,clearInterval(){},performance:{now:()=>0}};
 vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);const t=c.test;
 (async()=>{
@@ -34,7 +34,19 @@ vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);c
  assert.equal(timers.size,0);events.online();assert.equal(timers.size,0);
  c.location.pathname='/';await el('retry').onclick();assert.deepEqual(seen.at(-1),{});assert.match(el('state').textContent,/本次共享链接/);
  events.online();assert.equal(timers.size,0);
- console.log('PASS automatic View recovery, background return, no input/lease replay, explicit stop, ended/bare link stops');
+ // Granted lease: the status line stops saying 「正在申请控制权」.
+ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r))};
+ c.location.pathname='/w/w';c.fetch=async path=>path.includes('/snapshot')?new Promise(()=>{}):{ok:true,status:200,json:async()=>path==='/session'?{window_id:'w',window_generation:'g'}:path.endsWith('/meta')?{window_generation:'g'}:{resource:'/w/w/events',ticket:'test'}};
+ const join=async()=>{timers.clear();await el('retry').onclick();await flush();const ws=sockets.at(-1);ws.onopen();return ws};
+ let ws=await join();const st={t:'state',window_id:'w',window_generation:'g',controls_enabled:true,role:'human',mode:'View',busy:false,geometry_epoch:1};
+ ws.onmessage({data:JSON.stringify(st)});el('interact').onclick();assert.match(el('detail').textContent,/正在申请控制权/);
+ ws.onmessage({data:JSON.stringify({...st,mode:'Interact',lease_id:'L',lease_epoch:1})});
+ assert.doesNotMatch(el('detail').textContent,/正在申请控制权/,'lease granted but status still says requesting');assert.match(el('detail').textContent,/已获得控制权/);
+ // Host exit closes the socket with 1001: show 「共享已结束」 and stop retrying; any other close still recovers.
+ timers.clear();ws.onclose({code:1001});assert.match(el('state').textContent,/共享已结束/,'host exit left: '+el('state').textContent);assert.doesNotMatch(el('detail').textContent,/控制权/);
+ assert.equal(timers.size,0);events.online();assert.equal(timers.size,0);
+ ws=await join();timers.clear();ws.onclose({code:1006});assert([...timers.values()].some(x=>x.ms===1500));
+ console.log('PASS automatic View recovery, background return, no input/lease replay, explicit stop, ended/bare link stops, lease granted note, host exit ends share');
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
 with tempfile.TemporaryDirectory() as directory:

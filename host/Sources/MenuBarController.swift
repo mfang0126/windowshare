@@ -210,6 +210,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         guard let binding, selection == binding else { return }
         print("[share] ended reason=\(reason)"); fflush(stdout)
         dropOpenerWatch() // the opener's share is over: its exit must not end a later one (N3)
+        // A CLI share exits at once (except 「完成」, whose 10 s grace answers 410): send the end to viewers before the revoke.
+        if autoShare != nil, reason != "done" { stopControl(); control?.stop() }
         stopSharing()
         guard autoShare != nil else { return }
         // One CLI process is one share: exit so it keeps neither the port nor agent.json (R2). After 「完成」 wait
@@ -252,5 +254,5 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     @objc private func openBrowser() {
         NSWorkspace.shared.open(selection.flatMap { URL(string: PairingSession.shareLink(configuration.origin, $0)) } ?? configuration.entryURL)
     }
-    func applicationWillTerminate(_ notification: Notification) { AgentFile.remove(); identity.revokeWindow(); stopControl(); control?.stop() }
+    func applicationWillTerminate(_ notification: Notification) { AgentFile.remove(); stopControl(); control?.stop(); identity.revokeWindow() }
 }

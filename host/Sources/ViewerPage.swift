@@ -150,7 +150,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
     }
     if(m.mode==='Interact'&&wanted){
       if(old&&(old.lease_epoch!==m.lease_epoch||old.lease_id!==m.lease_id||old.geometry_epoch!==m.geometry_epoch)){leave('控制权或几何已改变，请重新开启');return;}
-      lease=m;if(!old){seq=0;resetInput();frameVersion++;image.onload=image.onerror=null;image.removeAttribute('src');displayedGeometry=null;frameSeq=0;snapshot();}
+      lease=m;if(!old){note('已获得控制权；最多 5 分钟，不自动续期。');seq=0;resetInput();frameVersion++;image.onload=image.onerror=null;image.removeAttribute('src');displayedGeometry=null;frameSeq=0;snapshot();}
     }else{
       lease=null;
       if(old){wanted=false;resetInput();stream();note('控制权已结束；不会自动恢复。');}
@@ -166,7 +166,8 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
       const address=location.protocol==='https:'?'wss://'+location.host+ticket.resource:'ws://'+location.hostname+':'+port+ticket.resource;
       const ws=new WebSocket(address);socket=ws;
       ws.onopen=()=>{if(version===epoch&&socket===ws)raw({t:'auth',ticket:ticket.ticket,resource:ticket.resource});};
-      ws.onclose=()=>{if(version===epoch&&socket===ws)recover();};
+      // 1001 (going away) is sent only when the host process exits: the share is over, so stop instead of retrying a dead link.
+      ws.onclose=e=>{if(version!==epoch||socket!==ws)return;if(e?.code===1001){stopped=true;clearTimeout(reconnectTimer);clear('共享已结束：Mac 已停止共享，链接已失效');note('需要继续时，请向 Bot 要新的共享链接。');}else recover();};
       ws.onerror=()=>{if(version===epoch&&socket===ws)recover();};
       ws.onmessage=event=>{
         if(version!==epoch||socket!==ws)return;

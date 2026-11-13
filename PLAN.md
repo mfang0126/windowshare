@@ -48,6 +48,8 @@ v1 = M1（含 M1-6..10）+ M2 + M4。
 
 公开发布准备（2026-11-13）：README 改成英文 `README.md` + 中文 `README.zh-CN.md`（互相链接，加「测试」一节），加 MIT `LICENSE`；删除过时的 `Scripts/verify-morning.sh`（查的 `/status.json`、`/snapshot.jpg` 早已删除，改用 `windowshare status --json`）。打 tag、建 Release、仓库改 public 等用户定版本号后再做。
 
+两个真机 bug 修复（2026-11-13）：① host 进程退出（开启进程退出、SIGTERM、Quit、CLI 的限时/窗口关闭等立即退出路径）后手机停在「连接 View」：撤销窗口会立刻断开控制 WebSocket，手机只能当成网络中断一直重试死掉的 host。改为退出前先用 WebSocket close 1001 通知 viewer（`ControlServer.stop()`，最多等 0.5 秒，在 `revokeWindow` 之前调用），viewer 收到 1001 就停止重试并显示「共享已结束：Mac 已停止共享，链接已失效」；其它关闭码仍自动恢复。② Interact 已生效时状态行仍是「正在申请控制权」：拿到 lease 时改为「已获得控制权」。`verify-view-recovery` 新增两项：v1.0.0 上各自 FAIL、修复后 PASS；全部 verify 脚本 exit 0。真机（Android 经 Tailscale，假数据窗口 `ws-v1-mock`，release 签名包）：v1.0.0 拿到控制权后仍显示「正在申请控制权」、杀掉开启进程 8 秒和 14 秒后都是「连接 View」；修复后显示「已获得控制权」，开启进程退出后显示「共享已结束」。SIGTERM / Quit 和限时、窗口关闭路径走同一处代码，真机未单独测。
+
 ## 延迟测量方法
 
 起点：手机上松手发出点击（`pointerup`）。终点：手机 viewer 里画面黑白翻转的那张快照解码完成（`image.onload`）。不含触摸采样和屏幕刷新（大约多 20–40ms）；每次测量方法相同，前后可比。
