@@ -97,7 +97,9 @@ final class ControlServer {
     }
     /// Called only when the process is about to exit: tell each viewer the share ended (WebSocket close 1001, going away)
     /// so the phone shows 「共享已结束」 instead of retrying a dead host. Waits at most 1 s, also for the 1001 that
-    /// `close` already sent when the share ended inside `PairingSession` (12-hour limit, window closed).
+    /// `close` already sent when the share ended inside `PairingSession` (12-hour limit, window closed, and every end
+    /// path that revokes the window before calling this). The wait only delays transport cleanup: frames and input must
+    /// already be revoked by then.
     func stop() {
         let deadline = DispatchTime.now() + 1
         let started = DispatchGroup()
