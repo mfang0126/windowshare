@@ -61,6 +61,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   function clear(message){
     controlsEnabled=false;
     epoch++;frameVersion++;clearTimeout(timer);clearTimeout(snapshotTimer);clearInterval(poll);timer=poll=snapshotTimer=null;
+    if(lease||wanted)note('控制权已结束；不会自动恢复。');
     const old=socket;socket=null;old?.close();authority=lease=null;wanted=false;displayedGeometry=null;snapshotBusy=false;resetInput();
     image.onload=image.onerror=null;image.removeAttribute('src');image.hidden=true;if(frameURL)URL.revokeObjectURL(frameURL);frameURL=null;
     render();el('state').textContent=message;el('close').disabled=true;
@@ -131,7 +132,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   async function reqDecide(decision){
     if(!req)return;const id=req.id;el('reqdone').disabled=el('reqcancel').disabled=true;
     try{await api('/request/decision',{id,decision});if(req&&req.id===id)reqShow(null);el('reqerr').textContent='';
-      if(decision==='done'){stopped=true;clearTimeout(reconnectTimer);clear('已完成：本次共享已结束，链接已失效');}}
+      if(decision==='done'){stopped=true;clearTimeout(reconnectTimer);clear('已完成：本次共享已结束，链接已失效');note('需要继续时，请向 Bot 要新的共享链接。');}}
     catch(e){el('reqerr').textContent='提交失败：请求可能已结束或连接异常';}
     finally{el('reqdone').disabled=el('reqcancel').disabled=false;}
   }

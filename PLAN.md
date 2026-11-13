@@ -52,6 +52,8 @@ v1 = M1（含 M1-6..10）+ M2 + M4。
 
 先撤画面再等握手（2026-11-13，复审 P2-2）：上一条把 terminate（SIGTERM / Quit / 开启进程退出）和 unavailable（睡眠 / 锁屏）改成先 `control.stop()` 等 1001 握手（最多 1 秒）再 `revokeWindow`，对端不回 close 时这 1 秒里画面权限还在，旧 cookie 仍能拿到新发布的帧。改为：`endShare` 先 `stopSharing()`（`revokeWindow` 同步撤销画面和输入，并经 `ControlServer.close` 发出 1001），再 `control.stop()` 只等握手；`applicationWillTerminate` 同样先 `revokeWindow` 再 `stop()`。握手只延长传输清理，不延长共享权限。`verify-host-close` 加上画面检查（客户端不回 close，结束后 150 ms 发布受控帧，200 ms 后用原 cookie 取 `/w/<id>/snapshot`，不能拿到该帧），terminate 改为调用真正的 `applicationWillTerminate` 内容：38425d7 上 terminate、unavailable FAIL（200 且拿到新帧），修复后四条路径都收到 1001、快照 401，连跑 3 次 PASS；全部 8 个 verify exit 0，release 构建 exit 0。
 
+结束后状态行残留（2026-11-13，发布门 F-1）：手机拿到控制权后在请求卡片上点「完成」，标题变成「已完成：本次共享已结束，链接已失效」，下面状态行还留着「已获得控制权；最多 5 分钟，不自动续期。」。原因：`ViewerPage.swift` 的 `clear()` 只换标题、不动状态行，「完成」分支也没有像 1001 分支那样再写一句。持有控制权时点「停止观看」同样残留。改为：`clear()` 在持有或正在申请控制权时先把状态行写成「控制权已结束；不会自动恢复。」（所有结束路径都经过它）；「完成」分支再写「需要继续时，请向 Bot 要新的共享链接。」，和 1001 路径一致。`verify-view-recovery` 新增「完成」「停止观看」两项：26f05ee 上 FAIL（`done left: 已获得控制权…`），只修「完成」分支时「停止观看」仍 FAIL，修复后 PASS。
+
 ## 延迟测量方法
 
 起点：手机上松手发出点击（`pointerup`）。终点：手机 viewer 里画面黑白翻转的那张快照解码完成（`image.onload`）。不含触摸采样和屏幕刷新（大约多 20–40ms）；每次测量方法相同，前后可比。
