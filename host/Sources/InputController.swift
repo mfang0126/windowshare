@@ -21,38 +21,78 @@ final class InputController {
         var postedUp = 0
     }
     private let window: WindowInfo
-    private let launchDate: Date?
     private var heldButtons: [CGMouseButton: CGPoint] = [:]
     private var heldKeys: Set<CGKeyCode> = []
     private var lastPoint: CGPoint?
     private var savedFrame: CGRect?
     private var setFrame: CGRect?
     private var armed = false
+    private let probe: Probe
 
     init(window: WindowInfo) {
         self.window = window
-        launchDate = NSRunningApplication(processIdentifier: window.ownerPID)?.launchDate
+        let launchDate = NSRunningApplication(processIdentifier: window.ownerPID)?.launchDate
+        probe = Probe(
+            launchMatches: { launchDate != nil && NSRunningApplication(processIdentifier: window.ownerPID)?.launchDate == launchDate },
+            rows: { CGWindowListCopyWindowInfo(.optionIncludingWindow, window.id) as? [[String: Any]] },
+            displays: { rect in
+                var ids = [CGDirectDisplayID](repeating: 0, count: 8)
+                var count: UInt32 = 0
+                return CGGetDisplaysWithRect(rect, 8, &ids, &count) == .success ? Array(ids.prefix(Int(count))) : nil
+            },
+            mode: { CGDisplayCopyDisplayMode($0).map { (width: $0.width, pixelWidth: $0.pixelWidth) } })
+    }
+    /// The native reads behind `measure`; `displays` is nil when the query itself fails. Verify scripts substitute
+    /// them to fail each check in turn without a real window.
+    struct Probe {
+        var launchMatches: () -> Bool
+        var rows: () -> [[String: Any]]?
+        var displays: (CGRect) -> [CGDirectDisplayID]?
+        var mode: (CGDirectDisplayID) -> (width: Int, pixelWidth: Int)?
+    }
+    /// Checks run in order and stop at the first failure, which `failure.check` names (F-4). `rectOnly` stops after
+    /// the bounds check and returns [x, y, w, h] (`liveRect`); otherwise [x, y, w, h, scale].
+    static func measure(id: CGWindowID, pid: pid_t, probe: Probe, rectOnly: Bool = false) -> Result<[Double], PairingSession.GeometryFailure> {
+        var f = PairingSession.GeometryFailure(check: .launchDate)
+        f.launchOK = probe.launchMatches()
+        guard f.launchOK else { return .failure(f) }
+        f.check = .windowCount
+        let rows = probe.rows()
+        f.windows = rows?.count ?? -1
+        guard let rows, rows.count == 1 else { return .failure(f) }
+        f.check = .windowIdentity
+        f.idOK = (rows[0][kCGWindowNumber as String] as? NSNumber)?.uint32Value == id
+        f.pidOK = (rows[0][kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid
+        guard f.idOK, f.pidOK else { return .failure(f) }
+        f.check = .bounds
+        guard let bounds = rows[0][kCGWindowBounds as String] as? [String: CGFloat],
+              let x = bounds["X"], let y = bounds["Y"], let w = bounds["Width"], let h = bounds["Height"],
+              w > 0, h > 0 else { return .failure(f) }
+        f.boundsOK = true
+        let rect = [Double(x), Double(y), Double(w), Double(h)]
+        if rectOnly { return .success(rect) }
+        f.check = .displayCount
+        let displays = probe.displays(CGRect(x: x, y: y, width: w, height: h))
+        f.displayQueryOK = displays != nil
+        f.displays = displays?.count ?? -1
+        guard let displays, displays.count == 1 else { return .failure(f) }
+        f.check = .displayMode
+        guard let mode = probe.mode(displays[0]) else { return .failure(f) }
+        f.modeOK = true
+        f.check = .modeWidth
+        guard mode.width > 0 else { return .failure(f) }
+        f.modeWidthOK = true
+        f.check = .nonFinite
+        let value = rect + [Double(mode.pixelWidth) / Double(mode.width)]
+        guard value.allSatisfy({ $0.isFinite }) else { return .failure(f) }
+        return .success(value)
     }
     func liveRect() -> CGRect? {
-        guard let launchDate, NSRunningApplication(processIdentifier: window.ownerPID)?.launchDate == launchDate,
-              let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, window.id) as? [[String: Any]],
-              list.count == 1, let item = list.first,
-              (item[kCGWindowNumber as String] as? NSNumber)?.uint32Value == window.id,
-              (item[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == window.ownerPID,
-              let bounds = item[kCGWindowBounds as String] as? [String: CGFloat],
-              let x = bounds["X"], let y = bounds["Y"], let w = bounds["Width"], let h = bounds["Height"],
-              w > 0, h > 0 else { return nil }
-        return CGRect(x: x, y: y, width: w, height: h)
+        guard case .success(let r) = Self.measure(id: window.id, pid: window.ownerPID, probe: probe, rectOnly: true) else { return nil }
+        return CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
     }
-    func geometry() -> [Double]? {
-        guard let rect = liveRect() else { return nil }
-        var displays = [CGDirectDisplayID](repeating: 0, count: 8)
-        var count: UInt32 = 0
-        guard CGGetDisplaysWithRect(rect, 8, &displays, &count) == .success, count == 1,
-              let mode = CGDisplayCopyDisplayMode(displays[0]), mode.width > 0 else { return nil }
-        let scale = Double(mode.pixelWidth) / Double(mode.width)
-        return [Double(rect.minX), Double(rect.minY), Double(rect.width), Double(rect.height), scale]
-    }
+    func measure() -> Result<[Double], PairingSession.GeometryFailure> { Self.measure(id: window.id, pid: window.ownerPID, probe: probe) }
+    func geometry() -> [Double]? { try? measure().get() }
     private func hit(_ point: CGPoint) -> Bool {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], 0) as? [[String: Any]] else { return false }
         for item in list {

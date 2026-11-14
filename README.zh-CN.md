@@ -92,6 +92,8 @@ python3 Scripts/verify-direct-entry.py
 python3 Scripts/verify-cleanup-lifetime.py
 python3 Scripts/verify-view-recovery.py
 python3 Scripts/verify-windowshare-show.py
+python3 Scripts/verify-host-close.py
+python3 Scripts/verify-geometry-diagnostics.py
 ```
 
 旧的 `Scripts/verify-morning.sh` 查的是早已删除的 `/status.json`、`/snapshot.jpg`，已在 2026-11-13 删除；检查 host 是否在跑、在共享什么，用 `Scripts/windowshare status --json`。

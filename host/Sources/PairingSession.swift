@@ -20,6 +20,25 @@ final class PairingSession {
             Reply(status: status, body: (try? JSONSerialization.data(withJSONObject: value)) ?? Data())
         }
     }
+    /// F-4: which caller observed the geometry that revoked the share.
+    enum GeometrySource: String { case capture, input, commitGate = "commit_gate" }
+    /// F-4: which native geometry check failed (checks run in this order and stop at the first failure; fields of
+    /// later checks keep false / -1). Only a fixed check name, booleans and counts are ever logged: never a title,
+    /// coordinate, pixel, link or token.
+    struct GeometryFailure: Error, CustomStringConvertible {
+        enum Check: String {
+            case launchDate = "launch_date", windowCount = "window_count", windowIdentity = "window_identity", bounds
+            case displayCount = "display_count", displayMode = "display_mode", modeWidth = "mode_width", nonFinite = "non_finite"
+            case noReader = "no_reader"
+        }
+        var check: Check
+        var launchOK = false, windows = -1, idOK = false, pidOK = false, boundsOK = false
+        var displayQueryOK = false, displays = -1, modeOK = false, modeWidthOK = false, values = -1
+        var description: String {
+            "check=\(check.rawValue) launch_ok=\(launchOK) windows=\(windows) id_ok=\(idOK) pid_ok=\(pidOK) bounds_ok=\(boundsOK) " +
+            "display_query_ok=\(displayQueryOK) displays=\(displays) mode_ok=\(modeOK) mode_width_ok=\(modeWidthOK) values=\(values)"
+        }
+    }
     private struct Pair {
         let binding: Binding; let deadline: TimeInterval
         let principal = UUID().uuidString
@@ -328,6 +347,9 @@ final class PairingSession {
             return context
         }
     }
+    /// True once the share this viewer authenticated for is over (window cleared or replaced), as opposed to a
+    /// dropped connection or an expired session of a share that is still running.
+    func shareEnded(_ context: Context) -> Bool { locked { binding != context.binding } }
     func disconnect(_ context: Context) {
         locked {
             guard let connection = connections[context.connectionID], connection.context == context else { return }
@@ -407,10 +429,25 @@ final class PairingSession {
         }
     }
     /// Geometry is read on main from the exact native window, never from cached capture metadata.
-    func observeGeometry(_ value: [Double]?, binding expected: Binding) -> Int? {
-        locked {
+    func observeGeometry(_ value: [Double], binding expected: Binding) -> Int? {
+        observeGeometry(.success(value), source: .capture, binding: expected)
+    }
+    /// Any failure revokes frames and input at once (fail-closed, no retry); the one log line names the check and
+    /// the caller that triggered the revocation (F-4).
+    func observeGeometry(_ reading: Result<[Double], GeometryFailure>, source: GeometrySource, binding expected: Binding) -> Int? {
+        var revoked: GeometryFailure?
+        defer { if let revoked { fputs("[geometry] unavailable source=\(source.rawValue) \(revoked)\n", stderr) } } // after unlock
+        return locked {
             guard active, binding == expected else { return nil }
-            guard let value, value.count == 5, value.allSatisfy({ $0.isFinite }) else { clearWindow("geometryUnavailable"); return nil }
+            var failure: GeometryFailure
+            switch reading {
+            case .failure(let f): failure = f
+            case .success(let v): failure = GeometryFailure(check: .nonFinite); failure.values = v.count
+            }
+            guard case .success(let value) = reading, value.count == 5, value.allSatisfy({ $0.isFinite }) else {
+                revoked = failure
+                clearWindow("geometryUnavailable"); return nil
+            }
             if geometry != value {
                 if geometry != nil {
                     geometryEpoch += 1; revokeLease("geometryChanged")

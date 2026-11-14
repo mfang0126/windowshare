@@ -210,7 +210,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         guard let binding, selection == binding else { return }
         print("[share] ended reason=\(reason)"); fflush(stdout)
         dropOpenerWatch() // the opener's share is over: its exit must not end a later one (N3)
+        // Revoke frames and input first (P2-2): the close-1001 wait below may only delay transport cleanup, never the share.
         stopSharing()
+        // A CLI share exits at once (except 「完成」, whose 10 s grace answers 410): wait for the viewers' 1001 handshakes,
+        // which revokeWindow already started through ControlServer.close.
+        if autoShare != nil, reason != "done" { control?.stop() }
         guard autoShare != nil else { return }
         // One CLI process is one share: exit so it keeps neither the port nor agent.json (R2). After 「完成」 wait
         // so windowshare-show (polls every 2 s) can still read `done`.
@@ -252,5 +256,5 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     @objc private func openBrowser() {
         NSWorkspace.shared.open(selection.flatMap { URL(string: PairingSession.shareLink(configuration.origin, $0)) } ?? configuration.entryURL)
     }
-    func applicationWillTerminate(_ notification: Notification) { AgentFile.remove(); identity.revokeWindow(); stopControl(); control?.stop() }
+    func applicationWillTerminate(_ notification: Notification) { AgentFile.remove(); stopControl(); identity.revokeWindow(); control?.stop() }
 }

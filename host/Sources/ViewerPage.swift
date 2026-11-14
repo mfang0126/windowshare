@@ -61,6 +61,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   function clear(message){
     controlsEnabled=false;
     epoch++;frameVersion++;clearTimeout(timer);clearTimeout(snapshotTimer);clearInterval(poll);timer=poll=snapshotTimer=null;
+    if(lease||wanted)note('控制权已结束；不会自动恢复。');
     const old=socket;socket=null;old?.close();authority=lease=null;wanted=false;displayedGeometry=null;snapshotBusy=false;resetInput();
     image.onload=image.onerror=null;image.removeAttribute('src');image.hidden=true;if(frameURL)URL.revokeObjectURL(frameURL);frameURL=null;
     render();el('state').textContent=message;el('close').disabled=true;
@@ -131,7 +132,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   async function reqDecide(decision){
     if(!req)return;const id=req.id;el('reqdone').disabled=el('reqcancel').disabled=true;
     try{await api('/request/decision',{id,decision});if(req&&req.id===id)reqShow(null);el('reqerr').textContent='';
-      if(decision==='done'){stopped=true;clearTimeout(reconnectTimer);clear('已完成：本次共享已结束，链接已失效');}}
+      if(decision==='done'){stopped=true;clearTimeout(reconnectTimer);clear('已完成：本次共享已结束，链接已失效');note('需要继续时，请向 Bot 要新的共享链接。');}}
     catch(e){el('reqerr').textContent='提交失败：请求可能已结束或连接异常';}
     finally{el('reqdone').disabled=el('reqcancel').disabled=false;}
   }
@@ -150,7 +151,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
     }
     if(m.mode==='Interact'&&wanted){
       if(old&&(old.lease_epoch!==m.lease_epoch||old.lease_id!==m.lease_id||old.geometry_epoch!==m.geometry_epoch)){leave('控制权或几何已改变，请重新开启');return;}
-      lease=m;if(!old){seq=0;resetInput();frameVersion++;image.onload=image.onerror=null;image.removeAttribute('src');displayedGeometry=null;frameSeq=0;snapshot();}
+      lease=m;if(!old){note('已获得控制权；最多 5 分钟，不自动续期。');seq=0;resetInput();frameVersion++;image.onload=image.onerror=null;image.removeAttribute('src');displayedGeometry=null;frameSeq=0;snapshot();}
     }else{
       lease=null;
       if(old){wanted=false;resetInput();stream();note('控制权已结束；不会自动恢复。');}
@@ -166,7 +167,8 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
       const address=location.protocol==='https:'?'wss://'+location.host+ticket.resource:'ws://'+location.hostname+':'+port+ticket.resource;
       const ws=new WebSocket(address);socket=ws;
       ws.onopen=()=>{if(version===epoch&&socket===ws)raw({t:'auth',ticket:ticket.ticket,resource:ticket.resource});};
-      ws.onclose=()=>{if(version===epoch&&socket===ws)recover();};
+      // 1001 (going away) is sent only when the host process exits: the share is over, so stop instead of retrying a dead link.
+      ws.onclose=e=>{if(version!==epoch||socket!==ws)return;if(e?.code===1001){stopped=true;clearTimeout(reconnectTimer);clear('共享已结束：Mac 已停止共享，链接已失效');note('需要继续时，请向 Bot 要新的共享链接。');}else recover();};
       ws.onerror=()=>{if(version===epoch&&socket===ws)recover();};
       ws.onmessage=event=>{
         if(version!==epoch||socket!==ws)return;
@@ -187,7 +189,9 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
       const m=await api(base()+'/meta',undefined,AbortSignal.timeout(5000));if(version!==epoch)return;
       if(m.window_generation!==binding.window_generation)throw Error('窗口已改变，请打开当前共享入口');
       timer=setTimeout(()=>monitor(version),1500);
-    }catch(e){if(version===epoch)recover(e.message);}
+    // When the share ends this poll can fail (401) just before the control socket's close 1001 arrives: while that
+    // socket is open, give it 1 s to say 「共享已结束」 instead of recovering against a host that is exiting.
+    }catch(e){if(version===epoch){if(socket?.readyState===1)timer=setTimeout(()=>{if(version===epoch)recover(e.message);},1000);else recover(e.message);}}
   }
   function watch(){clear('View · 连接中');const version=epoch;el('close').disabled=false;el('retry').disabled=false;stream();monitor(version);connect(version);}
   let sentText=null;
