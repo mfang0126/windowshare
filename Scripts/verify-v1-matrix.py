@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """No-injection v1 authority, cleanup and FPS regression."""
+
+# Native event posting is forbidden for every verify subprocess.
+import os as _verify_os
+_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import os, shutil, subprocess, tempfile
 root = Path(__file__).resolve().parents[1]

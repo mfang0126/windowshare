@@ -15,6 +15,10 @@ The share-end methods are copied verbatim from MenuBarController.swift (from `st
 a harness whose UI, capture and input are inert stubs. Injected clock, temp lock dir, no listeners, capture,
 input or GUI. Usage (repo root): python3 Scripts/verify-share-ending.py [--source <repo root to test>]
 """
+
+# Native event posting is forbidden for every verify subprocess.
+import os as _verify_os
+_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 import re, select, subprocess, sys, tempfile
 from pathlib import Path
 

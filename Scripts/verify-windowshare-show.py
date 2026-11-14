@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Offline check (no GUI) of Scripts/windowshare-show against a fake loopback host."""
+
+# Native event posting is forbidden for every verify subprocess.
+import os as _verify_os
+_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 import json, os, subprocess, sys, tempfile, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 

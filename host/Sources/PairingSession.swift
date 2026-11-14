@@ -113,6 +113,7 @@ final class PairingSession {
     private var expiryTimer: DispatchSourceTimer?
     private var unlockObserver: NSObjectProtocol?
     private var lockObserver: NSObjectProtocol?
+    private let screenNotifications: NotificationCenter
     private var stateObserver: (() -> Void)?
     static let cleanupRetryCap: TimeInterval = 30
     static func cleanupRetryDelay(failures: Int) -> TimeInterval {
@@ -153,7 +154,8 @@ final class PairingSession {
     /// Told (outside the lock) whenever a lease starts or ends, so capture can tune itself for Interact (M2-a).
     func observeInteract(_ observer: ((Bool) -> Void)?) { locked { interactObserver = observer } }
 
-    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, screenLocked: @escaping () -> Bool = InputController.screenLocked) {
+    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, screenLocked: @escaping () -> Bool = InputController.screenLocked, screenNotifications: NotificationCenter = DistributedNotificationCenter.default()) {
+        self.screenNotifications = screenNotifications
         self.now = now
         self.screenLocked = screenLocked
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "windowshare.expiry"))
@@ -161,17 +163,17 @@ final class PairingSession {
         timer.setEventHandler { [weak self] in self?.locked { self?.expire() } }
         timer.resume()
         expiryTimer = timer
-        lockObserver = DistributedNotificationCenter.default().addObserver(
+        lockObserver = screenNotifications.addObserver(
             forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: nil
         ) { [weak self] _ in self?.screenDidLock() }
-        unlockObserver = DistributedNotificationCenter.default().addObserver(
+        unlockObserver = screenNotifications.addObserver(
             forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: nil
         ) { [weak self] _ in self?.locked { self?.cleanupRetryAt = 0 } }
     }
     deinit {
         expiryTimer?.cancel()
-        if let unlockObserver { DistributedNotificationCenter.default().removeObserver(unlockObserver) }
-        if let lockObserver { DistributedNotificationCenter.default().removeObserver(lockObserver) }
+        if let unlockObserver { screenNotifications.removeObserver(unlockObserver) }
+        if let lockObserver { screenNotifications.removeObserver(lockObserver) }
     }
 
     func screenDidLock() { locked { revokeLease("screenLocked") } }

@@ -8,6 +8,10 @@ booleans and counts, the share is revoked at once (fail-closed, nothing retried)
 token or coordinate. It also checks that the three production call sites pass their own caller name.
 Usage (repo root): python3 Scripts/verify-geometry-diagnostics.py [--source <repo root to test>]
 """
+
+# Native event posting is forbidden for every verify subprocess.
+import os as _verify_os
+_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import subprocess, sys, tempfile
 

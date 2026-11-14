@@ -11,6 +11,10 @@ PairingSession and CaptureController with the end-path methods copied verbatim f
 NSApp.terminate are stubs. No capture, input, GUI or agent.json.
 Usage (repo root): python3 Scripts/verify-host-close.py [--source <repo root to test>]
 """
+
+# Native event posting is forbidden for every verify subprocess.
+import os as _verify_os
+_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import subprocess,socket,json,os,struct,base64,re,select,sys,tempfile,time,http.client,random
 root=Path(sys.argv[sys.argv.index('--source')+1] if '--source' in sys.argv else Path(__file__).resolve().parent.parent)

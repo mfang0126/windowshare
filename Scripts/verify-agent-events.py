@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Agent event channel (GET /agent/events/<after>): every event kind, auth, repeated subscribers, no sensitive fields,
 left/disconnected never revoke the share, and the real HTTP long poll (`windowshare-show --events` is in verify-windowshare-show.py). No GUI, capture or input."""
+
+# Native event posting is forbidden for every verify subprocess.
+import os as _verify_os
+_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import http.client, json, os, socket, subprocess, tempfile, threading, time
 

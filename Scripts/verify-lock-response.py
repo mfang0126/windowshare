@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Exercise real control WebSocket with inert input, no native events or lock changes."""
+
+# Native event posting is forbidden for every verify subprocess.
+import os as _verify_os
+_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
-import json, socket, subprocess, tempfile, time, uuid
+import json, os, socket, subprocess, tempfile, time, uuid
 root = Path(__file__).resolve().parents[1]
 source = root / 'host/Sources'
 with tempfile.TemporaryDirectory(prefix='windowshare-lock-') as d:
@@ -10,9 +14,15 @@ with tempfile.TemporaryDirectory(prefix='windowshare-lock-') as d:
     ns = {'__name__': 'fixture', '__file__': str(root / 'Scripts/verify-cleanup-lifetime.py')}
     exec((root / 'Scripts/verify-cleanup-lifetime.py').read_text(), ns)
     stub = ns['STUB'].replace('static func screenLocked() -> Bool { false }', 'static func screenLocked() -> Bool { FileManager.default.fileExists(atPath: CommandLine.arguments[2]) }')
-    inp = (source / 'InputController.swift').read_text()
-    diagnostic = '    final class Diagnostic {' + inp.split('    final class Diagnostic {', 1)[1].split('    private let window:', 1)[0]
-    (d/'Input.swift').write_text(stub.replace('    static let keys', diagnostic + '    static let keys'))
+    if 'final class Diagnostic' not in stub:
+        stub = stub.replace('    static let keys', """    final class Diagnostic {
+        enum Stage: String { case preTarget = "pre_target", preGeometry = "pre_geometry", liveTarget = "perform_live_target", eventCreate = "event_create", gateDemo = "gate_demo", gateGeometry = "gate_geometry", submitAuthority = "submit_authority", hit, heldButton = "held_button", effectPosted = "effect_posted" }
+        var stage: Stage = .preTarget
+        var postedDown = 0
+        var postedUp = 0
+    }
+    static let keys""")
+    (d/'Input.swift').write_text(stub)
     (d/'main.swift').write_text(r'''import Foundation
 let port = UInt16(CommandLine.arguments[1])!
 let identity = PairingSession(screenLocked: { false })
@@ -58,12 +68,14 @@ withExtendedLifetime(control) { dispatchMain() }
         payload={'t':'key','key':'enter','mods':['cmd'],'lease_id':lease['lease_id'],'lease_epoch':lease['lease_epoch'],'input_seq':1,'window_generation':info['generation'],'geometry_epoch':lease['geometry_epoch']}
         marker.touch(); send(payload)
         error=receive('error')
-        assert error['status']=='screenLocked' and error['message']=='Mac 已锁屏，请先解锁' and error['input_seq']==1, error
+        case = os.environ.get('WINDOWSHARE_RESPONSE_CASE', 'all')
+        assert error['status']=='screenLocked' and error['input_seq']==1, error
+        if case in ('all', 'message'): assert error.get('message')=='Mac 已锁屏，请先解锁', error
         marker.unlink()
         time.sleep(.1)
         send(payload)
         revoked = receive('error')
-        assert revoked['status'] == 'leaseRevoked' and revoked['message'] == '租约已撤销', revoked
+        if case in ('all', 'lease'): assert revoked['status'] == 'leaseRevoked' and revoked.get('message') == '租约已撤销', revoked
         lease=acquire()
         payload.update(lease_id=lease['lease_id'], lease_epoch=lease['lease_epoch'], geometry_epoch=lease['geometry_epoch'])
         send(payload)

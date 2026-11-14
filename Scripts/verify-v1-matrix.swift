@@ -9,7 +9,8 @@ let token = String(repeating: "ab", count: 32)
 let secretReason = "SECRET-REASON-登录"
 PairingSession.leaveGrace = 45
 var locked = false
-let identity = PairingSession(now: { clock }, screenLocked: { locked })
+let notifications = NotificationCenter()
+let identity = PairingSession(now: { clock }, screenLocked: { locked }, screenNotifications: notifications)
 identity.installCleanup { _ in }
 identity.configureAgent(token: token, entry: "http://100.1.2.3:8790/")
 var binding = identity.selectWindow()
@@ -105,6 +106,7 @@ precondition(drain().isEmpty, "one revoke per lock cycle")
 precondition(cleanupEpochs.count == 1)
 identity.finishCleanup(epoch: cleanupEpochs[0], success: false)
 locked = false
+notifications.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
 _ = identity.state(control.context)
 precondition(cleanupEpochs.count == 2 && cleanupEpochs[0] == cleanupEpochs[1], "retry cleanup after unlock")
 identity.finishCleanup(epoch: cleanupEpochs[1], success: false)
@@ -137,8 +139,15 @@ let recovered = identity.state(control.context)!
 precondition(recovered["busy"] as? Bool == false && recovered["cleanup_failed"] as? Bool == false)
 precondition(identity.acquire(control.context, operation: UUID().uuidString, ttl: 300) == "ok", "acquire after cleanup")
 let beforeNotification = cleanupEpochs.count
-identity.screenDidLock() // callback path, with injected screen query still false: notification itself revokes
+notifications.post(name: Notification.Name("com.apple.screenIsLocked"), object: nil) // injected process-local notification
 precondition(cleanupEpochs.count == beforeNotification + 1 && identity.state(control.context)!["mode"] as? String == "View", "lock notification revokes immediately")
+let retryEpoch = cleanupEpochs.last!
+identity.finishCleanup(epoch: retryEpoch, success: false)
+let beforeUnlockNotice = cleanupEpochs.count
+notifications.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+precondition(cleanupEpochs.count == beforeUnlockNotice + 1, "unlock notification retries before backoff expires")
+identity.finishCleanup(epoch: retryEpoch, success: true)
+precondition(identity.state(control.context)!["busy"] as? Bool == false, "notification retry clears barrier")
 let restarted = PairingSession(now: { clock }, screenLocked: { false })
 restarted.installCleanup { _ in }
 let freshBinding = restarted.selectWindow()
