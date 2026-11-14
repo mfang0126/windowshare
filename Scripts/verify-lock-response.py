@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Exercise real control WebSocket with inert input, no native events or lock changes."""
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import json, os, socket, subprocess, tempfile, time, uuid
 root = Path(__file__).resolve().parents[1]
@@ -42,7 +39,7 @@ ticket["generation"] = binding.generation
 print(String(data: try! JSONSerialization.data(withJSONObject: ticket), encoding: .utf8)!); fflush(stdout)
 withExtendedLifetime(control) { dispatchMain() }
 ''')
-    subprocess.run(['swiftc', *[str(source/x) for x in ['PairingSession.swift','ControlServer.swift','EntryConfiguration.swift','AgentRequest.swift','ViewerPage.swift']], str(d/'Input.swift'), str(d/'main.swift'), '-o', str(d/'server')], check=True)
+    subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(source/x) for x in ['PairingSession.swift','ControlServer.swift','EntryConfiguration.swift','AgentRequest.swift','ViewerPage.swift']], str(d/'Input.swift'), str(d/'main.swift'), '-o', str(d/'server')], check=True)
     with socket.socket() as p:
         p.bind(('127.0.0.1', 0)); port=p.getsockname()[1]
     marker=d/'locked'

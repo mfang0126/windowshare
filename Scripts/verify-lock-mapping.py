@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the actual session dictionary mapping using an in-process CGSession double."""
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 import argparse, os, subprocess, tempfile
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument('--source-root',type=Path,default=Path(__file__).resolve().parents[1]); a=p.parse_args()
@@ -34,5 +31,5 @@ for (name, value, expected) in [("missing session", nil as CFDictionary?, true),
 }
 print("PASS lock mapping")
 ''')
- subprocess.run(['swiftc',str(a.source_root/'host/Sources/InputController.swift'),str(d/'stubs.swift'),str(d/'main.swift'),'-o',str(d/'test')],check=True)
- subprocess.run([str(d/'test')],check=True,env=dict(os.environ,WINDOWSHARE_TEST_NO_NATIVE_POST='1'))
+ subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST',str(a.source_root/'host/Sources/InputController.swift'),str(d/'stubs.swift'),str(d/'main.swift'),'-o',str(d/'test')],check=True)
+ subprocess.run([str(d/'test')],check=True,env=os.environ.copy())

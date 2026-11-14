@@ -6,9 +6,6 @@ exact delayed A-after-B defect using the same API on both implementations.
 No capture, browser, native input, or authority implementation substitution.
 """
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 import argparse
 from pathlib import Path
 import subprocess
@@ -206,7 +203,7 @@ def main():
         (path / 'Input.swift').write_text(STUB)
         subprocess.run(['python3', str(ROOT / 'Scripts/verify-input-poster.py')], check=True)
         (path / 'main.swift').write_text(MAIN)
-        command = ['swiftc', '-o', str(path / 'verify'), str(path / 'PairingSession.swift')]
+        command = ['swiftc', '-D', 'WINDOWSHARE_TEST', '-o', str(path / 'verify'), str(path / 'PairingSession.swift')]
         command += [str(sources / name) for name in ['ControlServer.swift', 'EntryConfiguration.swift', 'AgentRequest.swift',
                                                     'ViewerPage.swift']]
         command += [str(path / 'Input.swift'), str(path / 'main.swift')]

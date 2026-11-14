@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Run production cleanup with a recording poster; never post native input."""
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import os, subprocess, tempfile
 root = Path(__file__).resolve().parents[1]
@@ -28,7 +25,9 @@ if CommandLine.arguments.contains("guard") {
  let input = InputController(window: window, isLocked: { false })
  input.testTrackKey(0)
  _ = input.cleanup()
- fatalError("native post guard did not fire")
+ precondition(InputController.testNativePostAttempts == 1)
+ print("PASS native post attempt recorded and execution continued")
+ exit(0)
 }
 var events: [(CGEventType, CGEventFlags, CGPoint)] = []
 let input = InputController(window: window, poster: { events.append(($0.type, $0.flags, $0.location)) }, isLocked: { false })
@@ -42,6 +41,9 @@ print("PASS production cleanup recorded keyUp and modifier release with empty fl
 let test = InputController(window: window, poster: { events.append(($0.type, $0.flags, $0.location)) }, isLocked: { false })
 test.testFrame = CGRect(x: 0, y: 0, width: 100, height: 100)
 let pass: InputController.Gate = { $0() }
+// Explicitly provide enough approvals for the following successful actions.
+test.testHits = Array(repeating: true, count: 64)
+test.testFocus = Array(repeating: true, count: 64)
 events = []
 precondition(test.perform(["t":"click", "x":0.5, "y":0.5, "count":3], gate: pass))
 precondition(events.map { $0.0 } == [.leftMouseDown,.leftMouseUp,.leftMouseDown,.leftMouseUp,.leftMouseDown,.leftMouseUp])
@@ -59,6 +61,7 @@ for obj: [String: Any] in [["t":"click", "x":0.5, "y":0.5], ["t":"scroll", "dx":
 }
 precondition(events.count == before)
 locked = false
+blocked.testHits = [true]
 precondition(blocked.perform(["t":"down", "x":0.5, "y":0.5], gate: pass))
 locked = true
 precondition(!blocked.cleanup() && events.count == before + 1)
@@ -66,14 +69,16 @@ locked = false
 precondition(blocked.cleanup() && events.count == before + 2 && events.last!.0 == .leftMouseUp)
 let partial = InputController(window: window, poster: { events.append(($0.type, $0.flags, $0.location)) }, isLocked: { false })
 partial.testFrame = CGRect(x: 0, y: 0, width: 100, height: 100)
-partial.testFailCreateAt = 2
+partial.testHits = [true]
+partial.testFailCreateButtons = [.left]
+partial.testFailCreateMouseTypes = [.leftMouseUp]
 let d = InputController.Diagnostic()
 precondition(!partial.perform(["t":"click", "x":0.5, "y":0.5], diagnostic: d, gate: pass))
 precondition(d.postedDown == 1 && d.postedUp == 0)
-partial.testFailCreateAt = partial.testCreateCount + 1
+
 let beforeFailedCleanup = events.count
 precondition(!partial.cleanup() && events.count == beforeFailedCleanup)
-partial.testFailCreateAt = 0
+partial.testFailCreateButtons = []
 precondition(partial.cleanup() && events.last!.0 == .leftMouseUp)
 events = []
 precondition(test.perform(["t":"down", "x":0.2, "y":0.2], gate: pass))
@@ -82,6 +87,7 @@ precondition(test.perform(["t":"up", "x":0.9, "y":0.9], gate: pass))
 precondition(events.map { $0.0 } == [.leftMouseDown, .leftMouseUp] && events.last!.2 == CGPoint(x:20,y:20))
 let n = events.count
 precondition(!test.perform(["t":"up", "x":0.5, "y":0.5], gate: pass) && events.count == n)
+test.testHits = Array(repeating: true, count: 64)
 for kind in ["down", "move", "drag", "up"] {
  precondition(test.perform(["t":kind,"x":0.5,"y":0.5],gate:pass))
 }
@@ -100,12 +106,35 @@ for refuseAt in 1...5 {
  precondition(test.cleanup() && events.count == after)
 }
 for refuseAt in 1...5 {
+ test.testFocus = Array(repeating: true, count: 64)
  events = []; var gates = 0
  precondition(!test.perform(["t":"key","key":"v","mods":["cmd","shift"]]) { effect in gates += 1; return gates <= refuseAt && effect() })
  precondition(events.filter { $0.0 == .flagsChanged }.last.map { $0.1.isEmpty } ?? true)
  let after = events.count
  precondition(test.cleanup() && events.count == after)
 }
+let exhausted = InputController(window: window, poster: { _ in events.append((.null, [], .zero)) }, isLocked: { false })
+exhausted.testFrame = CGRect(x:0,y:0,width:100,height:100)
+let beforeExhausted = events.count
+precondition(!exhausted.perform(["t":"down","x":0.5,"y":0.5],gate:pass) && events.count == beforeExhausted)
+exhausted.testHits = [true]
+precondition(exhausted.perform(["t":"down","x":0.5,"y":0.5],gate:pass))
+precondition(!exhausted.perform(["t":"key","key":"v"],gate:pass))
+exhausted.testFocus = [true, true, true]
+precondition(exhausted.perform(["t":"key","key":"v"],gate:pass))
+precondition(exhausted.cleanup())
+let failure = InputController(window: window, poster: { _ in events.append((.null, [], .zero)) }, isLocked: { false })
+failure.testTrackButton(.right, point: .zero); failure.testTrackButton(.left, point: .zero)
+failure.testTrackKey(0); failure.testTrackKey(55)
+failure.testFailCreateButtons = [.right]; failure.testFailCreateMouseTypes = [.rightMouseUp]
+failure.testFailCreateKeys = [55]
+let beforeFailure = events.count
+precondition(!failure.cleanup() && events.count == beforeFailure + 2)
+failure.testFailCreateButtons = []; failure.testFailCreateKeys = []
+precondition(failure.cleanup() && events.count == beforeFailure + 4)
+var ordered: [String] = []
+precondition(InputController.releaseTracked(buttons: [.right: .zero, .left: .zero], keys: [55, 0], releaseButton: { b, _ in ordered.append("b\(b.rawValue)"); return true }, releaseKey: { k in ordered.append("k\(k)"); return true }))
+precondition(ordered == ["b0", "b1", "k0", "k55"])
 let missing = InputController(window: window, poster: { events.append(($0.type, $0.flags, $0.location)) }, isLocked: { false })
 let diag = InputController.Diagnostic()
 precondition(!missing.perform(["t":"click","x":0.5,"y":0.5], diagnostic:diag,gate:pass) && diag.stage == .liveTarget)
@@ -122,11 +151,12 @@ interrupted.testTrackButton(.left, point: .zero); interrupted.testTrackButton(.r
 precondition(!interrupted.cleanup() && releaseCount == 1)
 lockedDuringCleanup = false
 precondition(interrupted.cleanup() && releaseCount == 2)
+precondition(InputController.testNativePostAttempts == 0, "unexpected native post attempts")
 print("PASS production input: click, chord, lock, deferred cleanup, release targeting and partial failures")
 ''')
     subprocess.run(['swiftc','-D','WINDOWSHARE_TEST',str(root/'host/Sources/InputController.swift'),str(d/'stubs.swift'),str(d/'main.swift'),'-o',str(d/'test')],check=True)
-    env = dict(os.environ, WINDOWSHARE_TEST_NO_NATIVE_POST='1')
+    env = os.environ.copy()
     subprocess.run([str(d/'test')],check=True,env=env)
     guard = subprocess.run([str(d/'test'),'guard'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-    assert guard.returncode != 0 and 'native event post forbidden in test process' in guard.stderr, guard.stderr
-    print('PASS real poster guard prevents native event')
+    assert guard.returncode != 0 and 'PASS native post attempt recorded' in guard.stdout and 'unexpected native post attempts' in guard.stderr, (guard.stdout, guard.stderr)
+    print('PASS real poster guard records without terminating')

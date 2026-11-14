@@ -12,9 +12,6 @@ NSApp.terminate are stubs. No capture, input, GUI or agent.json.
 Usage (repo root): python3 Scripts/verify-host-close.py [--source <repo root to test>]
 """
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import subprocess,socket,json,os,struct,base64,re,select,sys,tempfile,time,http.client,random
 root=Path(sys.argv[sys.argv.index('--source')+1] if '--source' in sys.argv else Path(__file__).resolve().parent.parent)
@@ -106,7 +103,7 @@ final class Controller {
 '''
 (ev/'host-close.swift').write_text(source)
 src=[str(root/'host/Sources'/f'{x}.swift') for x in ['CaptureController','InputController','PairingSession','ViewerPage','EntryConfiguration','AgentRequest','ControlServer','HTTPServer','WebAppAssets']]
-cmd=['swiftc','-parse-as-library',*src,str(ev/'host-close.swift'),'-o',str(ev/'host-close')]
+cmd=['swiftc', '-D', 'WINDOWSHARE_TEST','-parse-as-library',*src,str(ev/'host-close.swift'),'-o',str(ev/'host-close')]
 build=subprocess.run(cmd,capture_output=True,text=True,timeout=60);(ev/'host-close-build.log').write_text(build.stdout+build.stderr)
 print('build_exit',build.returncode);assert build.returncode==0,build.stderr
 results=[]

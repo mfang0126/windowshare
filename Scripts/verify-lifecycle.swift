@@ -1,5 +1,5 @@
 // Run from repo root:
-// swiftc -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-lifecycle.swift -o /tmp/verify-lifecycle && /tmp/verify-lifecycle
+// swiftc -D WINDOWSHARE_TEST -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-lifecycle.swift -o /tmp/verify-lifecycle && /tmp/verify-lifecycle
 import Foundation
 import AppKit
 

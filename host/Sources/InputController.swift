@@ -32,23 +32,34 @@ final class InputController {
     private let isLocked: () -> Bool
     private static func postToSystem(_ event: CGEvent) {
         #if WINDOWSHARE_TEST
-        preconditionFailure("native event post forbidden in test process")
+        _ = testPostGuard
+        testNativePostAttempts += 1
         #else
-        precondition(ProcessInfo.processInfo.environment["WINDOWSHARE_TEST_NO_NATIVE_POST"] != "1", "native event post forbidden in test process")
         event.post(tap: .cghidEventTap)
         #endif
     }
     #if WINDOWSHARE_TEST
+    // Test hooks and the poster are main-queue confined; posters must not re-enter the session gate.
+    static var testNativePostAttempts = 0
+    private static let testPostGuard: Void = {
+        atexit {
+            if testNativePostAttempts != 0 {
+                fputs("FAIL unexpected native post attempts: \(testNativePostAttempts)\n", stderr)
+                fflush(nil)
+                _exit(1)
+            }
+        }
+    }()
     func testTrackKey(_ code: CGKeyCode) { heldKeys.insert(code) }
     func testTrackButton(_ button: CGMouseButton, point: CGPoint) { heldButtons[button] = point }
     var testFrame: CGRect?
     var testHits: [Bool] = []
     var testFocus: [Bool] = []
-    var testCreateCount = 0
-    var testFailCreateAt = 0
-    private func testCanCreate() -> Bool {
-        testCreateCount += 1
-        return testFailCreateAt != testCreateCount
+    var testFailCreateButtons: Set<CGMouseButton> = []
+    var testFailCreateMouseTypes: Set<CGEventType> = []
+    var testFailCreateKeys: Set<CGKeyCode> = []
+    private func testCanCreate(_ button: CGMouseButton, _ type: CGEventType) -> Bool {
+        !testFailCreateButtons.contains(button) || !testFailCreateMouseTypes.contains(type)
     }
     #endif
     private var heldButtons: [CGMouseButton: CGPoint] = [:]
@@ -131,7 +142,7 @@ final class InputController {
     func geometry() -> [Double]? { try? measure().get() }
     private func hit(_ point: CGPoint) -> Bool {
         #if WINDOWSHARE_TEST
-        if testFrame != nil { return testHits.isEmpty ? true : testHits.removeFirst() }
+        if testFrame != nil { return testHits.isEmpty ? false : testHits.removeFirst() }
         #endif
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], 0) as? [[String: Any]] else { return false }
         for item in list {
@@ -201,7 +212,7 @@ final class InputController {
     }
     private func focused() -> Bool {
         #if WINDOWSHARE_TEST
-        if testFrame != nil { return testFocus.isEmpty ? true : testFocus.removeFirst() }
+        if testFrame != nil { return testFocus.isEmpty ? false : testFocus.removeFirst() }
         #endif
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == window.ownerPID,
               let target = target() else { return false }
@@ -212,10 +223,11 @@ final class InputController {
     }
     private func mouse(_ type: CGEventType, point: CGPoint, button: CGMouseButton, count: Int = 1, diagnostic: Diagnostic?, gate: Gate) -> Bool {
         diagnostic?.stage = .eventCreate
+        guard armed else { return false }
         #if WINDOWSHARE_TEST
-        guard testCanCreate() else { return false }
+        guard testCanCreate(button, type) else { return false }
         #endif
-        guard armed, let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else { return false }
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else { return false }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(count))
         let release = type == .leftMouseUp || type == .rightMouseUp
         var unverified = false
@@ -367,7 +379,11 @@ final class InputController {
     }
     /// Release-only, never gated: a modifier goes up as a flagsChanged with no flags (a plain key-up keeps the flag).
     private func releaseKey(_ code: CGKeyCode) -> Bool {
-        guard !self.isLocked(), let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return false }
+        guard !self.isLocked() else { return false }
+        #if WINDOWSHARE_TEST
+        guard !testFailCreateKeys.contains(code) else { return false }
+        #endif
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return false }
         event.flags = []
         if Self.modifierKeys.contains(where: { $0.code == code }) { event.type = .flagsChanged }
         guard !self.isLocked() else { return false }
@@ -379,8 +395,8 @@ final class InputController {
     static func releaseTracked(buttons: [CGMouseButton: CGPoint], keys: Set<CGKeyCode>,
                                releaseButton: (CGMouseButton, CGPoint) -> Bool, releaseKey: (CGKeyCode) -> Bool) -> Bool {
         var success = true
-        for (button, point) in buttons { if !releaseButton(button, point) { success = false } }
-        for code in keys { if !releaseKey(code) { success = false } }
+        for button in buttons.keys.sorted(by: { $0.rawValue < $1.rawValue }) { if !releaseButton(button, buttons[button]!) { success = false } }
+        for code in keys.sorted() { if !releaseKey(code) { success = false } }
         return success
     }
     /// Only releases actually submitted downs; cleanup may run after authority is revoked.
@@ -388,10 +404,12 @@ final class InputController {
         armed = false
         guard !self.isLocked() || (heldButtons.isEmpty && heldKeys.isEmpty && savedFrame == nil) else { return false }
         let success = Self.releaseTracked(buttons: heldButtons, keys: heldKeys, releaseButton: { button, point in
+            guard !self.isLocked() else { return false }
+            let type: CGEventType = button == .right ? .rightMouseUp : .leftMouseUp
             #if WINDOWSHARE_TEST
-            guard self.testCanCreate() else { return false }
+            guard self.testCanCreate(button, type) else { return false }
             #endif
-            guard !self.isLocked(), let event = CGEvent(mouseEventSource: nil, mouseType: button == .right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: point, mouseButton: button) else { return false }
+            guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else { return false }
             guard !self.isLocked() else { return false }
             self.poster(event); self.heldButtons[button] = nil; return true
         }, releaseKey: { self.releaseKey($0) })

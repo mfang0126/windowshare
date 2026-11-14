@@ -1,6 +1,6 @@
 // ADR 0003 share lifecycle: one share per Mac, opener lifetime, 12-hour limit, dead links after a share ends.
 // Run from repo root:
-// swiftc -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-share-lifecycle.swift -o /tmp/verify-share-lifecycle && /tmp/verify-share-lifecycle
+// swiftc -D WINDOWSHARE_TEST -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-share-lifecycle.swift -o /tmp/verify-share-lifecycle && /tmp/verify-share-lifecycle
 // Injected clock (no real waiting), a temp lock directory, child processes it owns. No listeners, capture, input or GUI.
 import Foundation
 

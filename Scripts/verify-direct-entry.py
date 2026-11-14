@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Direct network sessions and production lease authority; no GUI/capture/native input."""
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import subprocess
 import tempfile
@@ -345,7 +342,7 @@ with tempfile.TemporaryDirectory(prefix='windowshare-direct-') as directory:
     d = Path(directory)
     (d / 'main.swift').write_text(MAIN)
     sources = ['PairingSession.swift', 'ViewerPage.swift', 'EntryConfiguration.swift', 'InputController.swift', 'CaptureController.swift', 'AgentRequest.swift', 'CLI.swift']
-    subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in sources], str(d / 'main.swift'), '-o', str(d / 'check')], check=True)
+    subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in sources], str(d / 'main.swift'), '-o', str(d / 'check')], check=True)
     subprocess.run([str(d / 'check')], check=True)
     viewer = (ROOT / 'host/Sources/ViewerPage.swift').read_text().split('<script>')[1].split('</script>')[0]
     (d / 'viewer.js').write_text(viewer)
@@ -390,7 +387,7 @@ try server.start(port: UInt16(CommandLine.arguments[1])!)
 RunLoop.main.run()
 '''
     (d / 'main.swift').write_text(server)
-    subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in sources + ['HTTPServer.swift', 'WebAppAssets.swift']], str(d / 'main.swift'), '-o', str(d / 'http')], check=True)
+    subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in sources + ['HTTPServer.swift', 'WebAppAssets.swift']], str(d / 'main.swift'), '-o', str(d / 'http')], check=True)
     process = subprocess.Popen([str(d / 'http'), str(port), str(d / 'share-id')], stdout=subprocess.DEVNULL)
     def request(method, path, host=None, origin=None, cookie=None, auth=None, body=None, extra=None):
         conn = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
@@ -479,7 +476,7 @@ RunLoop.main.run()
         probe.write_text('import Foundation\nlet c = try! EntryConfiguration(port: 20871)\n'
                          'let s = ControlServer(configuration: c, input: nil, identity: PairingSession(screenLocked: { false }))\ntry! s.start()\nprint("ready"); fflush(stdout)\n'
                          'withExtendedLifetime(s) { dispatchMain() }\n')
-        subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in sources + ['ControlServer.swift']], str(probe), '-o', str(d / 'probe' / 'bin')], check=True)
+        subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in sources + ['ControlServer.swift']], str(probe), '-o', str(d / 'probe' / 'bin')], check=True)
         p2 = subprocess.Popen([str(d / 'probe' / 'bin')], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         try:
             assert p2.stdout.readline().strip() == 'ready'

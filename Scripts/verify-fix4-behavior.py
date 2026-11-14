@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Run unchanged PairingSession with inert input and an in-process notification center."""
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 import argparse, os, subprocess, tempfile
 from pathlib import Path
 p = argparse.ArgumentParser()
@@ -92,5 +89,5 @@ print("PASS \(scenario)")
 ''')
  exe=d/'test'
  files=[d/'PairingSession.swift',root/'host/Sources/EntryConfiguration.swift',root/'host/Sources/AgentRequest.swift',root/'host/Sources/ViewerPage.swift',d/'stubs.swift',d/'main.swift']
- subprocess.run(['swiftc',*[str(x) for x in files],'-o',str(exe)],check=True)
- subprocess.run([str(exe),a.case],check=True,env=dict(os.environ,WINDOWSHARE_TEST_NO_NATIVE_POST='1'),timeout=15)
+ subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST',*[str(x) for x in files],'-o',str(exe)],check=True)
+ subprocess.run([str(exe),a.case],check=True,env=os.environ.copy(),timeout=15)

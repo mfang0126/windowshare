@@ -89,8 +89,8 @@ Window selection (use exactly one):
 Run from the repo root. They use temporary directories, temporary ports and child processes only; no real window is captured and no mouse or keyboard input is sent:
 
 ```
-swiftc -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-share-lifecycle.swift -o /tmp/verify-share-lifecycle && WINDOWSHARE_TEST_NO_NATIVE_POST=1 /tmp/verify-share-lifecycle
-swiftc -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-lifecycle.swift -o /tmp/verify-lifecycle && WINDOWSHARE_TEST_NO_NATIVE_POST=1 /tmp/verify-lifecycle
+swiftc -D WINDOWSHARE_TEST -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-share-lifecycle.swift -o /tmp/verify-share-lifecycle && /tmp/verify-share-lifecycle
+swiftc -D WINDOWSHARE_TEST -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-lifecycle.swift -o /tmp/verify-lifecycle && /tmp/verify-lifecycle
 python3 Scripts/verify-share-ending.py
 python3 Scripts/verify-direct-entry.py
 python3 Scripts/verify-cleanup-lifetime.py
@@ -103,6 +103,7 @@ python3 Scripts/verify-v1-matrix.py
 python3 Scripts/verify-lock-response.py  # requires Python websocket-client
 python3 Scripts/verify-cleanup-push.py  # requires Python websocket-client
 python3 Scripts/verify-input-poster.py
+python3 Scripts/verify-test-isolation.py
 python3 Scripts/verify-lock-mapping.py
 python3 Scripts/verify-keyup-baseline.py
 for case in notification failure-event failure-kind backoff restart; do python3 Scripts/verify-fix4-behavior.py --case "$case" || exit 1; done

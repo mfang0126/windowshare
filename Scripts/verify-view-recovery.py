@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Run shipped viewer recovery with deterministic timers; no GUI or input injection."""
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import subprocess
 import tempfile

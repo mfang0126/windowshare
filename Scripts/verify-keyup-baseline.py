@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Compile the unchanged controller against in-process CGEvent and session doubles."""
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 import argparse, os, subprocess, tempfile
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('--source-root',type=Path,default=Path(__file__).resolve().parents[1]);p.add_argument('--baseline',action='store_true');a=p.parse_args()
@@ -51,5 +48,5 @@ if CGEvent.posted.count != 1 || CGEvent.posted[0].0 != .keyUp || !CGEvent.posted
 }
 print("PASS ordinary keyUp has empty flags")
 ''')
- cmd=['swiftc']+(['-D','BASELINE'] if a.baseline else [])+[str(d/'InputController.swift'),str(d/'stubs.swift'),str(d/'main.swift'),'-o',str(d/'test')]
- subprocess.run(cmd,check=True);subprocess.run([str(d/'test')],check=True,env=dict(os.environ,WINDOWSHARE_TEST_NO_NATIVE_POST='1'))
+ cmd=['swiftc', '-D', 'WINDOWSHARE_TEST']+(['-D','BASELINE'] if a.baseline else [])+[str(d/'InputController.swift'),str(d/'stubs.swift'),str(d/'main.swift'),'-o',str(d/'test')]
+ subprocess.run(cmd,check=True);subprocess.run([str(d/'test')],check=True,env=os.environ.copy())

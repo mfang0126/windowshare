@@ -2,9 +2,6 @@
 """Agent event channel (GET /agent/events/<after>): every event kind, auth, repeated subscribers, no sensitive fields,
 left/disconnected never revoke the share, and the real HTTP long poll (`windowshare-show --events` is in verify-windowshare-show.py). No GUI, capture or input."""
 
-# Native event posting is forbidden for every verify subprocess.
-import os as _verify_os
-_verify_os.environ['WINDOWSHARE_TEST_NO_NATIVE_POST'] = '1'
 from pathlib import Path
 import http.client, json, os, socket, subprocess, tempfile, threading, time
 
@@ -291,7 +288,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='windowshare-events-') as directory:
         d = Path(directory)
         (d / 'main.swift').write_text(UNIT)
-        subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in SOURCES], str(d / 'main.swift'), '-o', str(d / 'unit')], check=True)
+        subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in SOURCES], str(d / 'main.swift'), '-o', str(d / 'unit')], check=True)
         out = subprocess.run([str(d / "unit")], check=True, stdout=subprocess.PIPE, text=True, timeout=60).stdout
         assert 'SECRET' not in out and TOKEN not in out, 'event log lines carry nothing sensitive'
         print(out.strip().splitlines()[-1])
@@ -308,7 +305,7 @@ def main():
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
         (d / 'main.swift').write_text(HTTP)
-        subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift']],
+        subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift']],
                         str(d / 'main.swift'), '-o', str(d / 'http')], check=True)
         host = subprocess.Popen([str(d / 'http'), str(port), str(d / 'share-id')], stdout=subprocess.DEVNULL)
 
@@ -393,7 +390,7 @@ def main():
 
         # Real control WebSocket: leave message then close → left; close alone → disconnected (N = 1 s here).
         (d / 'main.swift').write_text(WS)
-        subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift', 'ControlServer.swift']],
+        subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift', 'ControlServer.swift']],
                         str(d / 'main.swift'), '-o', str(d / 'ws')], check=True)
         for _ in range(20):
             with socket.socket() as a, socket.socket() as b:
