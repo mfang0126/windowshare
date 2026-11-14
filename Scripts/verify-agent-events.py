@@ -170,6 +170,14 @@ precondition(phone("POST", "/session/close", [:], first.cookies).status == 200);
 tick(46); expect(["left:stop_watching"], "last viewer said it left")
 _ = rA; _ = rB
 
+// A page that closes without ever connecting a viewer records nothing.
+binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
+let lone = phone("POST", "/session", ["window_id": binding.windowID])
+let kv = lone.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
+precondition(phone("POST", "/session/close", [:], [kv[0]: kv[1]]).status == 200)
+tick(60); expect([], "closed without a viewer connection")
+rB = request(1800)
+
 // N is configurable.
 PairingSession.leaveGrace = 5
 v = viewer(); _ = drain(); identity.disconnect(v.context); alive = []
@@ -219,18 +227,17 @@ def main():
         out = subprocess.run([str(d / "unit")], check=True, stdout=subprocess.PIPE, text=True, timeout=60).stdout
         assert 'SECRET' not in out and TOKEN not in out, 'event log lines carry nothing sensitive'
         print(out.strip().splitlines()[-1])
-        # The event log line is printed after the lock is released (a slow stdout pipe must not stall frames and input).
+        # Recording an event writes no log line (a stalled stdout pipe must not hold up frames, input or cleanup).
         src = (ROOT / 'host/Sources/PairingSession.swift').read_text()
         emit = src[src.index('private func emit('):src.index('private func finishRequest(')]
-        assert 'deferred.append { print("[agent] event' in emit and emit.count('print(') == 1, 'event log outside the lock'
+        assert 'print(' not in emit and 'fputs(' not in emit, 'no log line in emit'
 
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
         (d / 'main.swift').write_text(HTTP)
         subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift']],
                         str(d / 'main.swift'), '-o', str(d / 'http')], check=True)
-        env = dict(os.environ, WINDOWSHARE_LEAVE_SEC='1')
-        host = subprocess.Popen([str(d / 'http'), str(port), str(d / 'share-id')], stdout=subprocess.DEVNULL, env=env)
+        host = subprocess.Popen([str(d / 'http'), str(port), str(d / 'share-id')], stdout=subprocess.DEVNULL)
 
         def call(method, path, auth='Bearer ' + TOKEN, origin=None, cookie=None, body=None, timeout=6):
             conn = http.client.HTTPConnection('127.0.0.1', port, timeout=timeout)
@@ -262,9 +269,10 @@ def main():
             started = time.monotonic(); status, _ = call('GET', '/agent/events/0')
             held = time.monotonic() - started
             assert status == 204 and 2.5 <= held < 4.5, (status, held)
-            # A waiting reader wakes when the event happens (phone 「停止观看」, N = 1 s via WINDOWSHARE_LEAVE_SEC).
-            s, b = call('POST', '/session', body=json.dumps({'window_id': share}), **phone)
-            assert s == 200
+            # A waiting reader wakes as soon as the event happens (the phone cancels the agent's request).
+            s, b = call('POST', '/agent/request', body=json.dumps({'reason': '测试', 'timeout_sec': 60}))
+            assert s == 201
+            rid = json.loads(b)['id']
             got = {}
             def wait(name):
                 got[name] = (time.monotonic(), call('GET', '/agent/events/0'))
@@ -275,14 +283,14 @@ def main():
             conn.request('POST', '/session', json.dumps({'window_id': share}), {'Host': f'127.0.0.1:{port}', 'Origin': phone['origin'], 'Content-Type': 'application/json'})
             r = conn.getresponse(); cookie = r.getheader('Set-Cookie').split(';')[0]; r.read(); conn.close()
             closed = time.monotonic()
-            assert call('POST', '/session/close', cookie=cookie, **phone)[0] == 200
+            assert call('POST', '/request/decision', cookie=cookie, body=json.dumps({'id': rid, 'decision': 'cancel'}), **phone)[0] == 200
             for t in readers: t.join()
             for name in ('a', 'b'):
                 at, (status, body) = got[name]
                 events = json.loads(body)['events']
-                assert status == 200 and [e['kind'] for e in events] == ['left'] and events[0]['reason'] == 'stop_watching', (name, status, body)
-                assert at - closed < 3.5, f'woke {at - closed:.2f}s after leave (N=1 s + 1 s tick)'
-            assert json.loads(call('GET', '/agent/status')[1])['entry'], 'left keeps the share'
+                assert status == 200 and [(e['kind'], e['reason'], e['request_id']) for e in events] == [('cancelled', 'phone_cancel', rid)], (name, status, body)
+                assert at - closed < 0.5, f'woke {at - closed:.2f}s after the decision'
+            assert json.loads(call('GET', '/agent/status')[1])['entry'], 'cancel keeps the share'
             # At most 4 waiting readers; the 5th is refused at once.
             results = []
             ws = [threading.Thread(target=lambda: results.append(call('GET', '/agent/events/1')[0])) for _ in range(4)]
@@ -301,7 +309,7 @@ def main():
             for sock in gone: sock.close()
             time.sleep(3.5)
             assert call('GET', '/agent/events/1')[0] == 204, 'slots released after hang-ups'
-            print('PASS HTTP: long poll 204 after ~3 s, two readers woken by the same left, auth/cookie/proxy/Host refused before waiting, 5th waiter 429, hung-up waiters release slots')
+            print('PASS HTTP: long poll 204 after ~3 s, two readers woken within 0.5 s by the same cancel, auth/cookie/proxy/Host refused before waiting, 5th waiter 429, hung-up waiters release slots')
 
         finally:
             host.terminate(); host.wait()

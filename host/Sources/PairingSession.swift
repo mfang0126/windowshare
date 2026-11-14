@@ -370,8 +370,7 @@ final class PairingSession {
                                    "at": Date().timeIntervalSince1970, "request_id": (request ?? agentRequest?.id) ?? NSNull()]
         if let hint { body["hint"] = hint }
         events.append((eventSeq, body))
-        if events.count > Self.eventRetention { events.removeFirst() }
-        deferred.append { print("[agent] event kind=\(kind) reason=\(reason)") } // after unlock; nothing sensitive
+        if events.count > Self.eventRetention { events.removeFirst() } // no log line: a stalled stdout must not hold up callers
     }
     private func finishRequest(_ status: AgentRequest.Status, _ reason: String) {
         guard agentRequest?.status == .pending else { return }
@@ -585,7 +584,7 @@ final class PairingSession {
                 // 「停止观看」 sends {}; the page sends {"source":"unload"} on pagehide (best effort, may never arrive).
                 guard exact([]) || (exact(["source"]) && fields["source"] as? String == "unload") else { return error(400) }
                 guard let sessionKey, sessions.removeValue(forKey: sessionKey) != nil else { return error(401) }
-                if active { leaveReason = fields.isEmpty ? "stop_watching" : "page_unload"; viewerSeen = true }
+                if active { leaveReason = fields.isEmpty ? "stop_watching" : "page_unload" } // counts only after a viewer connected
                 frame = nil; size = []
                 var reply = Reply.json(200, ["status": "closed"]); if authorization == nil { reply.cookies = [Self.cookie("session")] }; return reply
             default:
