@@ -14,6 +14,8 @@ class Fake(BaseHTTPRequestHandler):
     post = (201, {"id": "11111111-2222", "entry": LINK})
     statuses = ["done"]
     seen_bodies = []
+    events = []  # GET /agent/events/<seq> replies in order (code, body); empty → 404 (host without the event route)
+    event_paths = []
 
     def log_message(self, format, *args): pass
 
@@ -35,6 +37,13 @@ class Fake(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self._auth(): return
+        if self.path.startswith("/agent/events/"):
+            Fake.event_paths.append(self.path)
+            if not Fake.events: self._send(404, {"status": "rejected"}); return
+            code, obj = Fake.events.pop(0)
+            if code == 204:
+                self.send_response(204); self.send_header("Content-Length", "0"); self.end_headers(); return
+            self._send(code, obj); return
         s = Fake.statuses.pop(0) if len(Fake.statuses) > 1 else Fake.statuses[0]
         self._send(200, {"status": s, "remaining_sec": 10})
 
@@ -111,6 +120,40 @@ def main():
     good_body = Fake.seen_bodies == [exp]
     print(("PASS " if good_body else "FAIL ") + f"request body {Fake.seen_bodies}")
     fails += not good_body
+
+    # --events: woken by the host event route instead of sleeping 2 s; exit codes unchanged; left/disconnected only noted.
+    import time
+    rid = "11111111-2222"
+    def ev(seq, kind, reason, request_id=rid, hint=None):
+        e = {"seq": seq, "kind": kind, "reason": reason, "at": 1.0, "request_id": request_id}
+        if hint: e["hint"] = hint
+        return e
+    ecases = [
+        ("events: done", ["pending", "done"], [(200, {"events": [ev(1, "done", "phone_done")], "next": 1})], 0, None, ["/agent/events/0"]),
+        ("events: cancelled", ["pending", "cancelled"], [(200, {"events": [ev(1, "cancelled", "phone_cancel")], "next": 1})], 3, None, None),
+        ("events: timeout", ["pending", "timeout"], [(200, {"events": [ev(4, "timeout", "request_timeout")], "next": 4})], 4, None, None),
+        ("events: left noted, keeps waiting, cursor advances", ["pending", "pending", "pending", "done"],
+         [(200, {"events": [ev(3, "left", "stop_watching"), ev(4, "disconnected", "connection_lost", "other-id", "heartbeat_timeout")], "next": 4}),
+          (204, None), (200, {"events": [ev(5, "disconnected", "connection_lost", hint="heartbeat_timeout")], "next": 5})], 0,
+         "手机端 left（reason=stop_watching）；请求仍在等待\n手机端 disconnected（reason=connection_lost hint=heartbeat_timeout）；请求仍在等待\n",
+         ["/agent/events/0", "/agent/events/4", "/agent/events/4"]),
+        ("events: host without event route falls back to polling", ["pending", "done"], [], 0, "事件接口不可用（HTTP 404），改回轮询\n", None),
+    ]
+    for name, statuses, events, code, err, paths in ecases:
+        Fake.post = created; Fake.statuses = list(statuses); Fake.events = list(events); Fake.event_paths = []
+        started = time.monotonic()
+        rc, so, se = run(good, ("--reason", "测试", "--events"))
+        took = time.monotonic() - started
+        errs = []
+        if rc != code: errs.append(f"exit {rc} != {code}")
+        if so != ok_line: errs.append(f"stdout {so!r}")
+        if err is not None and se != err: errs.append(f"stderr {se!r} != {err!r}")
+        if paths is not None and Fake.event_paths != paths: errs.append(f"event paths {Fake.event_paths}")
+        if events and took >= 1.5: errs.append(f"took {took:.2f}s: slept instead of waiting on events")
+        if TOKEN in so + se: errs.append("token leaked")
+        print(("PASS " if not errs else "FAIL ") + name + ("" if not errs else ": " + "; ".join(errs)))
+        fails += bool(errs)
+    Fake.events = []
 
     print("ALL PASS" if not fails else f"{fails} FAILED")
     sys.exit(1 if fails else 0)

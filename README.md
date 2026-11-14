@@ -31,8 +31,10 @@ Always sign with the same certificate: macOS ties Screen Recording and Accessibi
 When an agent is stuck on a step that needs a person:
 
 ```
-Scripts/windowshare-show --reason "Need to sign in to AWS" [--timeout 300]
+Scripts/windowshare-show --reason "Need to sign in to AWS" [--timeout 300] [--events]
 ```
+
+`--events` (draft) waits on the host's local event feed `GET /agent/events/<after>` (loopback + Bearer, long poll) instead of polling every 2 s; exit codes are unchanged. Event kinds and fields: `skills/windowshare-show/SKILL.md`.
 
 It prints the phone link and waits until the person taps **完成** (done) on the phone. Exit codes:
 
@@ -96,6 +98,7 @@ python3 Scripts/verify-view-recovery.py
 python3 Scripts/verify-windowshare-show.py
 python3 Scripts/verify-host-close.py
 python3 Scripts/verify-geometry-diagnostics.py
+python3 Scripts/verify-agent-events.py
 ```
 
 The old `Scripts/verify-morning.sh` checked `/status.json` and `/snapshot.jpg`, which no longer exist; it was removed on 2026-11-13. To check whether the host is running and what it shares, use `Scripts/windowshare status --json`.
