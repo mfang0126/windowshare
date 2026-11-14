@@ -277,10 +277,10 @@ final class ControlServer {
                 return
             }
             diagnostic.stage = .preGeometry
-            let observed = identity.observeGeometry(input.geometry(), binding: context.binding)
+            let observed = identity.observeGeometry(input.measure(), source: .input, binding: context.binding)
             let ok = observed == geometry && input.perform(object, diagnostic: diagnostic) { effect in
                 diagnostic.stage = .gateGeometry
-                guard identity.observeGeometry(input.geometry(), binding: context.binding) == geometry else { return false }
+                guard identity.observeGeometry(input.measure(), source: .commitGate, binding: context.binding) == geometry else { return false }
                 diagnostic.stage = .submitAuthority
                 return identity.submit(context, id: id, epoch: epoch, sequence: sequence, generation: generation,
                                        geometry: geometry, execution: execution, effect: effect)

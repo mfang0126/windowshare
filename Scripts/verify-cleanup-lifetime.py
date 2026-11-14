@@ -22,6 +22,7 @@ final class InputController {
     var succeeds = true
     var onCleanup: (() -> Void)?
     func geometry() -> [Double]? { [0, 0, 800, 600, 2] }
+    func measure() -> Result<[Double], PairingSession.GeometryFailure> { .success([0, 0, 800, 600, 2]) }
     func perform(_ object: [String: Any], diagnostic: Diagnostic? = nil, gate: (() -> Bool) -> Bool) -> Bool {
         gate { self.held = true; return true }
     }
