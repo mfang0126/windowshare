@@ -20,6 +20,7 @@ final class HTTPServer {
         var sequence: UInt64 = 0
         var sendingSince: TimeInterval?
         var timer: DispatchSourceTimer?
+        var agentWaiting = false
         init(_ conn: NWConnection) { self.conn = conn }
     }
     init(identity: PairingSession) { self.identity = identity }
@@ -177,18 +178,28 @@ final class HTTPServer {
             }
         } else if method == "GET", headers["authorization"] == nil, path.contains("/snapshot/") {
             longPoll(client, path: path, cookies: cookies, until: ProcessInfo.processInfo.systemUptime + 2)
+        } else if method == "GET", isAgent, path.hasPrefix("/agent/events/") {
+            // Agent event long poll: held up to 3 s (under the 5 s idle close), re-checked every 50 ms. At most 4 at once
+            // so a looping agent cannot take the 32 connection slots from phones.
+            guard clients.values.filter(\.agentWaiting).count < 4 else { reject(client, 429); return true }
+            client.agentWaiting = true
+            longPoll(client, path: path, cookies: cookies, authorization: headers["authorization"], loopback: true,
+                     every: 50, until: ProcessInfo.processInfo.systemUptime + 3)
         } else {
             identity.respond(method: method, path: path, fields: fields, cookies: cookies, authorization: headers["authorization"], loopback: isAgent) { send(client, $0) }
         }
         return true
     }
-    /// Re-asks every 5 ms while the reply is 204 (no newer frame), for at most 2 s (under the 5 s idle close).
+    /// Re-asks every `every` ms while the reply is 204 (nothing newer), until `deadline` (under the 5 s idle close).
     /// ponytail: polling wait; switch to a publish notification if the 5 ms granularity ever shows in latency.
-    private func longPoll(_ client: Client, path: String, cookies: [String: String], until deadline: TimeInterval) {
+    private func longPoll(_ client: Client, path: String, cookies: [String: String], authorization: String? = nil, loopback: Bool = false,
+                          every: Int = 5, until deadline: TimeInterval) {
         guard clients[ObjectIdentifier(client.conn)] != nil else { return }
-        identity.respond(method: "GET", path: path, fields: [:], cookies: cookies) { reply in
+        identity.respond(method: "GET", path: path, fields: [:], cookies: cookies, authorization: authorization, loopback: loopback) { reply in
             if reply.status == 204, ProcessInfo.processInfo.systemUptime < deadline {
-                queue.asyncAfter(deadline: .now() + .milliseconds(5)) { [weak self] in self?.longPoll(client, path: path, cookies: cookies, until: deadline) }
+                queue.asyncAfter(deadline: .now() + .milliseconds(every)) { [weak self] in
+                    self?.longPoll(client, path: path, cookies: cookies, authorization: authorization, loopback: loopback, every: every, until: deadline)
+                }
             } else { send(client, reply) }
         }
     }

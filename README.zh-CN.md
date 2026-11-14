@@ -29,8 +29,10 @@
 agent 卡在需要人的步骤时：
 
 ```
-Scripts/windowshare-show --reason "需要登录 AWS" [--timeout 300]
+Scripts/windowshare-show --reason "需要登录 AWS" [--timeout 300] [--events]
 ```
+
+`--events`（草稿）：不每 2 秒轮询，改等 host 的本机事件接口 `GET /agent/events/<after>`（loopback + Bearer，长轮询）；退出码不变。事件种类和字段见 `skills/windowshare-show/SKILL.md`。
 
 命令打印「请在手机打开：<入口>」，等人在手机上点完成。退出码：
 
@@ -94,6 +96,7 @@ python3 Scripts/verify-view-recovery.py
 python3 Scripts/verify-windowshare-show.py
 python3 Scripts/verify-host-close.py
 python3 Scripts/verify-geometry-diagnostics.py
+python3 Scripts/verify-agent-events.py
 ```
 
 旧的 `Scripts/verify-morning.sh` 查的是早已删除的 `/status.json`、`/snapshot.jpg`，已在 2026-11-13 删除；检查 host 是否在跑、在共享什么，用 `Scripts/windowshare status --json`。

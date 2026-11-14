@@ -219,6 +219,10 @@ final class ControlServer {
             guard exact(["t"]) else { status("rejected"); return }
             if let state = identity.state(context) { reply(state, client) }; return
         }
+        if type == "leave" { // tells the Bot event feed this viewer left on purpose (`left`), see PairingSession.leave
+            guard exact(["t", "source"]), let source = object["source"] as? String, ["stop", "unload"].contains(source) else { status("rejected"); return }
+            identity.leave(context, source: source); return
+        }
         if type == "lease.acquire" {
             guard exact(["t", "operation_id", "lease_ttl_sec"]), let operation = object["operation_id"] as? String,
                   let ttl = Self.integer(object["lease_ttl_sec"]) else { status("rejected"); return }

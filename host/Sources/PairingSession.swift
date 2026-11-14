@@ -120,6 +120,21 @@ final class PairingSession {
     /// binding of the share it is about: the observer acts only while that share is still its current one.
     func observeShare(_ observer: ((String, Binding) -> Void)?) { locked { shareObserver = observer } }
     private var agentRequest: AgentRequest?
+    /// Agent event channel (`GET /agent/events/<after>`, loopback + Bearer only). Each event carries only
+    /// seq / kind / request_id / at / reason (+ optional hint): never a title, pixel, link, share id, token or request text.
+    private var events: [(seq: Int, body: [String: Any])] = []
+    private var eventSeq = 0
+    static let eventRetention = 64
+    /// N: how long no viewer may be connected before `left` (after an explicit leave) or `disconnected` (no explicit leave)
+    /// is recorded; a reconnect within N records nothing. Default 45 s, pending Ming's decision; `WINDOWSHARE_LEAVE_SEC` (1–3600).
+    static var leaveGrace: TimeInterval = ProcessInfo.processInfo.environment["WINDOWSHARE_LEAVE_SEC"]
+        .flatMap(Double.init).flatMap { (1...3600).contains($0) ? $0 : nil } ?? 45
+    private var viewerSeen = false
+    private var viewerGoneAt: TimeInterval?
+    private var leaveReason: String? // of the connection removed last; nil when it went without a leave signal
+    private var leaveSignals: [String: String] = [:] // connection id → leave reason it sent before closing
+    private var lossHint = "connection_closed"
+    private var goneRequest: String? // the request pending when the last viewer went (not when N ran out), else nil
     private var agentWindow: [String: Any]?
     private var interactObserver: ((Bool) -> Void)?
     /// Told (outside the lock) whenever a lease starts or ends, so capture can tune itself for Interact (M2-a).
@@ -139,7 +154,7 @@ final class PairingSession {
         lock.lock()
         expire(); pruneControl()
         defer {
-            pruneControl(); pruneStreams()
+            pruneControl(); pruneStreams(); trackPresence()
             let work = deferred; deferred.removeAll()
             lock.unlock()
             for callback in work { callback() }
@@ -171,7 +186,9 @@ final class PairingSession {
     func configureAgentWindow(_ info: [String: Any]) { locked { agentWindow = info } }
     private func clearWindow(_ reason: StaticString) {
         fputs("[session] window revoked reason=\(reason)\n", stderr)
-        agentRequest?.finish(.cancelled, at: now())
+        finishRequest(.cancelled, "share_ended")
+        if binding != nil { emit("share_ended", "\(reason)") }
+        viewerSeen = false; viewerGoneAt = nil; leaveReason = nil // the share is over: no left / disconnected for it
         active = false // revoke before clearing output and credentials
         binding = nil; frame = nil; size = []
         shareDeadline = nil
@@ -233,7 +250,7 @@ final class PairingSession {
             }
         }
         if let request = agentRequest {
-            if request.status == .pending, time >= request.deadline { agentRequest?.finish(.timeout, at: time) }
+            if request.status == .pending, time >= request.deadline { finishRequest(.timeout, "request_timeout") }
             if let end = request.finishedAt, time - end >= AgentRequest.retention { agentRequest = nil }
         }
         let pairCount = pairs.count, sessionCount = sessions.count
@@ -316,6 +333,8 @@ final class PairingSession {
             return valid(Stream(session: ticket.session, binding: session.binding, cancel: {}))
         }
         for (id, connection) in connections where !current(connection.context) {
+            lossHint = now() - connection.pongAt >= 15 ? "heartbeat_timeout" : "connection_closed"
+            leaveReason = leaveSignals.removeValue(forKey: id)
             connections[id] = nil
             sessions[connection.session] = nil
             deferred.append(connection.cancel)
@@ -338,7 +357,7 @@ final class PairingSession {
                   valid(Stream(session: issued.session, binding: session.binding, cancel: {})) else { return nil }
             for (id, old) in connections where old.session == issued.session {
                 if lease?.owner == old.context { revokeLease("reconnect") }
-                connections[id] = nil; deferred.append(old.cancel)
+                connections[id] = nil; leaveSignals[id] = nil; deferred.append(old.cancel)
             }
             let context = Context(principalID: pair.principal, pairingID: pair.id, sessionID: session.id,
                                   connectionID: UUID().uuidString, sessionEpoch: sessionEpoch, binding: session.binding)
@@ -347,9 +366,47 @@ final class PairingSession {
             return context
         }
     }
+    private func emit(_ kind: String, _ reason: String, hint: String? = nil, request: String?? = nil) {
+        eventSeq += 1
+        var body: [String: Any] = ["seq": eventSeq, "kind": kind, "reason": reason,
+                                   "at": Date().timeIntervalSince1970, "request_id": (request ?? agentRequest?.id) ?? NSNull()]
+        if let hint { body["hint"] = hint }
+        events.append((eventSeq, body))
+        if events.count > Self.eventRetention { events.removeFirst() } // no log line: a stalled stdout must not hold up callers
+    }
+    private func finishRequest(_ status: AgentRequest.Status, _ reason: String) {
+        guard agentRequest?.status == .pending else { return }
+        agentRequest?.finish(status, at: now())
+        emit(status.rawValue, reason)
+    }
+    /// Runs after every locked call (and the 1 s expiry tick). A viewer counts as present while it has a live control
+    /// connection; with several viewers only the last one to go decides: `left` if it sent a leave signal, else
+    /// `disconnected`. Neither revokes anything: the share, link and capture stay (only `done` ends it).
+    /// `disconnected` cannot tell a closed page from a dead network; its `hint` is only what the host last saw.
+    private func trackPresence() {
+        guard active, binding != nil else { return }
+        if !connections.isEmpty { viewerSeen = true; viewerGoneAt = nil; return }
+        guard viewerSeen else { return }
+        let time = now()
+        guard let gone = viewerGoneAt else {
+            viewerGoneAt = time; goneRequest = agentRequest?.status == .pending ? agentRequest?.id : nil; return
+        }
+        guard time - gone >= Self.leaveGrace else { return }
+        if let leaveReason { emit("left", leaveReason, request: .some(goneRequest)) }
+        else { emit("disconnected", "connection_lost", hint: lossHint, request: .some(goneRequest)) }
+        viewerSeen = false; viewerGoneAt = nil; leaveReason = nil
+    }
     /// True once the share this viewer authenticated for is over (window cleared or replaced), as opposed to a
     /// dropped connection or an expired session of a share that is still running.
     func shareEnded(_ context: Context) -> Bool { locked { binding != context.binding } }
+    /// The viewer says it is leaving (「停止观看」 or page unload), on its own control connection right before closing it,
+    /// so the signal belongs to that connection and arrives ahead of the close. Best effort: a killed app sends nothing.
+    func leave(_ context: Context, source: String) {
+        locked {
+            guard connections[context.connectionID]?.context == context else { return }
+            leaveSignals[context.connectionID] = source == "unload" ? "page_unload" : "stop_watching"
+        }
+    }
     func disconnect(_ context: Context) {
         locked {
             guard let connection = connections[context.connectionID], connection.context == context else { return }
@@ -526,7 +583,7 @@ final class PairingSession {
                 guard let id = fields["id"] as? String, let decision = fields["decision"] as? String,
                       ["done", "cancel"].contains(decision) else { return error(400) }
                 guard agentRequest?.id == id, agentRequest?.status == .pending else { return .json(409, ["status": "rejected"]) }
-                agentRequest?.finish(decision == "done" ? .done : .cancelled, at: now())
+                finishRequest(decision == "done" ? .done : .cancelled, decision == "done" ? "phone_done" : "phone_cancel")
                 // 「完成」 ends this share (ADR 0003 rule 2/5): link dead now; the agent can still read `done`.
                 if decision == "done", let ended = binding {
                     clearWindow("done")
@@ -536,6 +593,9 @@ final class PairingSession {
             case "/session/close":
                 guard exact([]) else { return error(400) }
                 guard let sessionKey, sessions.removeValue(forKey: sessionKey) != nil else { return error(401) }
+                // 「停止观看」 is also a leave signal for this session's own viewer connections, whichever of this POST and
+                // the socket's `leave` message the host handles first.
+                for (id, connection) in connections where connection.session == sessionKey { leaveSignals[id] = "stop_watching" }
                 frame = nil; size = []
                 var reply = Reply.json(200, ["status": "closed"]); if authorization == nil { reply.cookies = [Self.cookie("session")] }; return reply
             default:
@@ -596,6 +656,19 @@ final class PairingSession {
             return .json(200, ["entry": Self.shareLink(agentEntry, binding), "entries": agentEntries.map { Self.shareLink($0, binding) },
                                "window": agentWindow.map { $0 as Any } ?? NSNull(),
                                "ends_in_sec": shareDeadline.map { Int(max(0, $0 - now())) } ?? 0])
+        }
+        let feed = "/agent/events/"
+        if method == "GET", path.hasPrefix(feed) {
+            // Events newer than <after>; 204 when none (HTTPServer holds it as a long poll). Reading never consumes:
+            // any number of readers with the same cursor get the same events.
+            guard let after = Int(path.dropFirst(feed.count)), after >= 0 else { return .json(400, ["error": "bad_request"]) }
+            let reset = after > eventSeq // cursor from an earlier host process: start over from what is kept
+            let newer = events.filter { reset || $0.seq > after }.map(\.body)
+            guard reset || !newer.isEmpty else { return Reply(status: 204, body: Data()) }
+            var body: [String: Any] = ["events": newer, "next": eventSeq]
+            if reset { body["reset"] = true }
+            if let first = events.first?.seq, !reset, after < first - 1 { body["truncated"] = true }
+            return .json(200, body)
         }
         let prefix = "/agent/request/"
         if method == "GET", path.hasPrefix(prefix), let request = agentRequest, request.id == String(path.dropFirst(prefix.count)) {
