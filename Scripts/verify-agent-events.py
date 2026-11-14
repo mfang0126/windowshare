@@ -46,7 +46,7 @@ func drain() -> [[String: Any]] {
         precondition(e["at"] is Double && e["reason"] is String && e["seq"] is Int && e.keys.contains("request_id"))
     }
     cursor = body["next"] as! Int
-    return list
+    return list.filter { $0["kind"] as? String != "share_started" }
 }
 func kinds(_ list: [[String: Any]]) -> [String] { list.map { "\($0["kind"]!):\($0["reason"]!)" + (($0["hint"] as? String).map { "/" + $0 } ?? "") } }
 func expect(_ want: [String], _ what: String, line: Int = #line) {
@@ -95,7 +95,8 @@ precondition(phone("GET", "/agent/events/0").status == 403, "phone route without
 for bad in ["/agent/events/", "/agent/events/-1", "/agent/events/abc", "/agent/events/99999999999999999999999"] {
     precondition(reply("GET", bad).status == 400, bad)
 }
-precondition(reply("GET", "/agent/events/0").status == 204, "nothing yet")
+precondition(kinds(drain()).isEmpty, "initial share event consumed")
+precondition(reply("GET", "/agent/events/\(cursor)").status == 204, "nothing yet")
 
 // done: request + share end at once (the only event that revokes).
 var id = request()
@@ -333,7 +334,7 @@ def main():
                 r = conn.getresponse(); status = r.status; r.read(); conn.close()
                 assert status == 403, (extra, status)
             # Long poll: no event → 204 after about 3 s.
-            started = time.monotonic(); status, _ = call('GET', '/agent/events/0')
+            started = time.monotonic(); status, _ = call('GET', '/agent/events/1')
             held = time.monotonic() - started
             assert status == 204 and 2.5 <= held < 4.5, (status, held)
             # A waiting reader wakes as soon as the event happens (the phone cancels the agent's request).
@@ -342,7 +343,7 @@ def main():
             rid = json.loads(b)['id']
             got = {}
             def wait(name):
-                got[name] = (time.monotonic(), call('GET', '/agent/events/0'))
+                got[name] = (time.monotonic(), call('GET', '/agent/events/1'))
             readers = [threading.Thread(target=wait, args=(n,)) for n in ('a', 'b')]  # two subscribers at once
             for t in readers: t.start()
             time.sleep(.3)
@@ -360,22 +361,22 @@ def main():
             assert json.loads(call('GET', '/agent/status')[1])['entry'], 'cancel keeps the share'
             # At most 4 waiting readers; the 5th is refused at once.
             results = []
-            ws = [threading.Thread(target=lambda: results.append(call('GET', '/agent/events/1')[0])) for _ in range(4)]
+            ws = [threading.Thread(target=lambda: results.append(call('GET', '/agent/events/2')[0])) for _ in range(4)]
             for t in ws: t.start()
             time.sleep(.5)
-            assert call('GET', '/agent/events/1')[0] == 429
+            assert call('GET', '/agent/events/2')[0] == 429
             for t in ws: t.join()
             assert results == [204] * 4, results
             # Waiters that hang up early free their slot at the latest when their 3 s hold ends.
             gone = []
             for _ in range(4):
                 sock = socket.create_connection(('127.0.0.1', port))
-                sock.sendall(f'GET /agent/events/1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n'.encode())
+                sock.sendall(f'GET /agent/events/2 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n'.encode())
                 gone.append(sock)
             time.sleep(.3)
             for sock in gone: sock.close()
             time.sleep(3.5)
-            assert call('GET', '/agent/events/1')[0] == 204, 'slots released after hang-ups'
+            assert call('GET', '/agent/events/2')[0] == 204, 'slots released after hang-ups'
             print('PASS HTTP: long poll 204 after ~3 s, two readers woken within 0.5 s by the same cancel, auth/cookie/proxy/Host refused before waiting, 5th waiter 429, hung-up waiters release slots')
 
         finally:
@@ -402,7 +403,7 @@ def main():
                 if r.status == 200: return json.loads(body)
             raise AssertionError(f'no event after {after}')
         try:
-            cursor = 0
+            cursor = 1
             for leave, want in ((True, ('left', 'stop_watching')), (False, ('disconnected', 'connection_lost')), (True, ('left', 'stop_watching'))):
                 s, send = ws_viewer(proc, hport + 1, hport)
                 time.sleep(.3)

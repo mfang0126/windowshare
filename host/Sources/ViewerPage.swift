@@ -154,7 +154,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
       lease=m;if(!old){note('已获得控制权；最多 5 分钟，不自动续期。');seq=0;resetInput();frameVersion++;image.onload=image.onerror=null;image.removeAttribute('src');displayedGeometry=null;frameSeq=0;snapshot();}
     }else{
       lease=null;
-      if(old){wanted=false;resetInput();stream();note('控制权已结束；不会自动恢复。');}
+      if(old){wanted=false;resetInput();stream();note(m.screen_locked?'Mac 已锁屏，请先解锁':'控制权已结束；不会自动恢复。');}
     }
     render();
   }
@@ -176,7 +176,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
         if(m.t==='heartbeat'){if(!document.hidden)raw({t:'pong',nonce:m.nonce});return;}
         if(m.t==='state'){state(m);if(!authenticated&&authority){authenticated=true;note('正在观看；需要操作时开启 Interact。');}return;}
         if(m.t==='ack'||m.t==='error'){
-          if(m.t==='error'){leave('控制已停止；操作可能部分执行，请查看窗口结果，不要重复提交。');return;}
+          if(m.t==='error'){leave(m.status==='screenLocked'?'Mac 已锁屏，请先解锁':'控制已停止；操作可能部分执行，请查看窗口结果，不要重复提交。');return;}
           if(m.input_seq!==undefined&&pending===m.input_seq){if(sentText!==null&&el('text').value===sentText)el('text').value='';sentText=null;pending=null;const next=finalUp||latest;finalUp=latest=null;if(next)input(next);render();if(tuning.input&&!snapshotBusy&&wanted&&lease){clearTimeout(snapshotTimer);snapshot();}}
           raw({t:'state'});
         }

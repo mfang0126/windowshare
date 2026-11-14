@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STUB = r'''
 import Foundation
 final class InputController {
+    static func screenLocked() -> Bool { false }
     static let keys = ["enter": 36]
     static let modifiers = ["cmd": 1]
     static func allowedChord(key: String, mods: [String]) -> Bool { true }
@@ -213,6 +214,8 @@ final class CGEvent {
 }
 final class InputController {
     typealias Gate = (() -> Bool) -> Bool
+    static var locked = false
+    static func screenLocked() -> Bool { locked }
     var armed = false
     var heldButtons: [CGMouseButton: CGPoint] = [:]
     var heldKeys: Set<CGKeyCode> = []
@@ -269,12 +272,11 @@ for scenario in ["live", "create", "authority", "hit", "partial", "partial-creat
     }
     let before = CGEvent.posts
     precondition(input.cleanup())
-    // +1: cleanup always ends with a flagsChanged carrying no flags.
-    precondition(CGEvent.posts == before + (partial ? 1 : 0) + 1)
-    precondition(CGEvent.posted.last!.0 == .flagsChanged && CGEvent.posted.last!.2.isEmpty)
+    // No tracked keys means no global modifier event.
+    precondition(CGEvent.posts == before + (partial ? 1 : 0))
     precondition(input.heldButtons.isEmpty && !input.armed)
     precondition(d.postedDown == (ok ? 3 : partial ? 1 : 0) && d.postedUp == (ok ? 3 : 0))
-    precondition(input.cleanup() && CGEvent.posts == before + (partial ? 1 : 0) + 2)
+    precondition(input.cleanup() && CGEvent.posts == before + (partial ? 1 : 0))
     print("PASS input diagnostics: \(scenario)")
 }
 // A release is never skipped (H1 2026-10-27): if its point fails the hit test it is posted at the last verified
@@ -310,9 +312,18 @@ do {
     input.heldKeys = [55, 0]
     precondition(input.cleanup() && input.heldKeys.isEmpty)
     // The fake key-up starts with Command set, so a modifier released as a plain key-up would keep it.
-    precondition(CGEvent.posted.filter { $0.0 != .keyUp }.allSatisfy { $0.2.isEmpty } && CGEvent.posted.filter { $0.0 == .flagsChanged }.count == 2)
-    precondition(CGEvent.posted.count == 3 && CGEvent.posted.last!.0 == .flagsChanged && CGEvent.posted.last!.2.isEmpty)
+    precondition(CGEvent.posted.filter { $0.0 != .keyUp }.allSatisfy { $0.2.isEmpty } && CGEvent.posted.filter { $0.0 == .flagsChanged }.count == 1)
+    precondition(CGEvent.posted.count == 2)
     print("PASS cleanup releases modifiers and ends with no flags")
+}
+// Locking cannot post a release; held state survives until unlock.
+do {
+    let input = InputController()
+    input.heldKeys = [55]; CGEvent.posts = 0; InputController.locked = true
+    precondition(!input.cleanup() && CGEvent.posts == 0 && input.heldKeys == [55])
+    InputController.locked = false
+    precondition(input.cleanup() && CGEvent.posts == 1 && input.heldKeys.isEmpty)
+    print("PASS locked cleanup defers release until unlock")
 }
 // A chord ends with no flags and nothing held; refused part-way (focus moved after the modifier downs), it releases
 // what it pressed at once, last event without flags, before any cleanup.

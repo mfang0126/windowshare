@@ -136,3 +136,5 @@ Each change can be switched off for comparison: `WINDOWSHARE_M2A_OFF=push,fps,in
 ## License
 
 [MIT](LICENSE)
+
+View capture defaults to 24 fps; set `WINDOWSHARE_VIEW_FPS` to an integer from 2 to 60 to change it. When the Mac is locked, input is blocked and the viewer is asked to unlock it.

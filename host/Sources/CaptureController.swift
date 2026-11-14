@@ -213,7 +213,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         let output = Self.outputSize(points: live.frame.size, scale: 2)
         config.width = Int(output.width)
         config.height = Int(output.height)
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 15) // idle policy floor; StreamTuningPolicy later
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(Self.viewFPS)) // idle policy floor; StreamTuningPolicy later
         config.queueDepth = 3
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = true
@@ -291,12 +291,13 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     // Matches startCapture, so a reapply after an external resize keeps the starting resolution and rate.
     private var maxEdge: Int? // Interact cap (M2-a2), applied by the JPEG encoder
     private var lastScale: CGFloat = 2
-    private var lastFPS: Int = 15
+    static var viewFPS: Int { ProcessInfo.processInfo.environment["WINDOWSHARE_VIEW_FPS"].flatMap(Int.init).flatMap { (2...60).contains($0) ? $0 : nil } ?? 24 }
+    private var lastFPS: Int = viewFPS
 
     /// M2-a: tune the stream while a lease is held, restore it after.
     /// ponytail: a change that lands while another updateConfiguration is in flight is dropped; retry if seen.
     func setInteract(_ on: Bool) {
-        let fps = on && Tuning.fps ? 60 : 15
+        let fps = on && Tuning.fps ? 60 : Self.viewFPS
         let small = on && Tuning.small
         let scale: CGFloat = small ? 1 : 2
         let quality = on && Tuning.q4 ? 0.4 : small ? 0.5 : 0.65

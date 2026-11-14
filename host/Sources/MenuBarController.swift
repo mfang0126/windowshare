@@ -5,7 +5,7 @@ import AppKit
 final class MenuBarController: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let configuration: EntryConfiguration
-    private let identity = PairingSession()
+    private let identity = PairingSession(screenLocked: InputController.screenLocked)
     private lazy var server = HTTPServer(identity: identity)
     private var capture: CaptureController?
     private var control: ControlServer?

@@ -271,6 +271,11 @@ final class ControlServer {
         let execution = UUID()
         DispatchQueue.main.async { [self] in
             let diagnostic = InputController.Diagnostic()
+            if InputController.screenLocked() {
+                identity.cancelInput(context, id: id, epoch: epoch)
+                queue.async { client.busy = false; self.reply(["t": "error", "status": "screenLocked", "input_seq": sequence], client) }
+                return
+            }
             var accepted = false
             defer {
                 fputs("[input] seq=\(sequence) stage=\(diagnostic.stage.rawValue) accepted=\(accepted) posted_down=\(diagnostic.postedDown) posted_up=\(diagnostic.postedUp)\n", stderr)
@@ -294,7 +299,7 @@ final class ControlServer {
             queue.async {
                 client.busy = false
                 guard self.clients[ObjectIdentifier(client.connection)] != nil else { return }
-                self.reply(["t": ok ? "ack" : "error", "status": ok ? "ok" : "rejected", "input_seq": sequence], client)
+                self.reply(["t": ok ? "ack" : "error", "status": ok ? "ok" : (InputController.screenLocked() ? "screenLocked" : "rejected"), "input_seq": sequence], client)
                 if let state = self.identity.state(context) { self.reply(state, client) }
             }
         }

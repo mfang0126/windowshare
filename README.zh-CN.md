@@ -134,3 +134,5 @@ python3 Scripts/verify-agent-events.py
 ## 许可
 
 [MIT](LICENSE)
+
+View 捕获默认 24 fps；可用 `WINDOWSHARE_VIEW_FPS` 设置 2–60 的整数。Mac 锁屏时禁止输入，并提示观看者先解锁。

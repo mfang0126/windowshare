@@ -71,6 +71,7 @@ final class PairingSession {
     private var leaseEpoch = 0
     private var cleanupSerial = 0
     private var cleanupFailed = false
+    private var cleanupWaitsForUnlock = false
     private func controlAllowed(_ context: Context) -> Bool {
         active && binding == context.binding
     }
@@ -99,6 +100,7 @@ final class PairingSession {
     private var frameSequence: UInt64 = 0
     private let lock = NSLock()
     private let now: () -> TimeInterval
+    private let screenLocked: () -> Bool
     private var binding: Binding?
     private var active = false
     private var frame: Data?
@@ -140,8 +142,9 @@ final class PairingSession {
     /// Told (outside the lock) whenever a lease starts or ends, so capture can tune itself for Interact (M2-a).
     func observeInteract(_ observer: ((Bool) -> Void)?) { locked { interactObserver = observer } }
 
-    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, screenLocked: @escaping () -> Bool = { false }) {
         self.now = now
+        self.screenLocked = screenLocked
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "windowshare.expiry"))
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in self?.locked { self?.expire() } }
@@ -207,7 +210,7 @@ final class PairingSession {
     }
     /// Called only after the particular capture start completes. Never revives a stopped selection.
     func activate(_ expected: Binding) -> Bool {
-        locked { guard binding == expected else { return false }; active = true; return true }
+        locked { guard binding == expected else { return false }; if !active { active = true; emit("share_started", "capture_started") }; return true }
     }
     func isCurrent(_ expected: Binding) -> Bool { locked { binding == expected } }
     func revokeWindow(_ expected: Binding? = nil) {
@@ -306,7 +309,7 @@ final class PairingSession {
     func finishCleanup(epoch: Int, success: @autoclosure () -> Bool) {
         locked {
             guard cleanupPending == epoch, !cleanupFailed else { return }
-            guard success() else { cleanupFailed = true; return }
+            guard success() else { cleanupFailed = true; cleanupWaitsForUnlock = screenLocked(); return }
             cleanupPending = nil
         }
     }
@@ -316,18 +319,24 @@ final class PairingSession {
         return valid(Stream(session: connection.session, binding: context.binding, cancel: {}))
     }
     private func scheduleCleanup() {
-        cleanupSerial += 1; cleanupPending = cleanupSerial; cleanupFailed = false
+        cleanupSerial += 1; cleanupPending = cleanupSerial; cleanupFailed = false; cleanupWaitsForUnlock = false
         if let cleanupHandler { let epoch = cleanupSerial; deferred.append { cleanupHandler(epoch) } }
     }
     private func revokeLease(_ reason: StaticString) {
         guard let previous = lease else { return }
         fputs("[session] lease revoked reason=\(reason)\n", stderr)
         lease = nil
+        emit("interact_revoked", "\(reason)")
         if let interactObserver { deferred.append { interactObserver(false) } }
         retiredOperations.insert(previous.owner.sessionID + ":" + previous.operation)
         scheduleCleanup()
     }
     private func pruneControl() {
+        if cleanupWaitsForUnlock, !screenLocked(), let epoch = cleanupPending, let cleanupHandler {
+            cleanupWaitsForUnlock = false; cleanupFailed = false
+            deferred.append { cleanupHandler(epoch) }
+        }
+        if lease != nil && screenLocked() { revokeLease("screenLocked") }
         tickets = tickets.filter { _, ticket in
             guard ticket.deadline > now(), let session = sessions[ticket.session] else { return false }
             return valid(Stream(session: ticket.session, binding: session.binding, cancel: {}))
@@ -439,7 +448,7 @@ final class PairingSession {
                 "window_generation": context.binding.generation, "geometry_epoch": geometryEpoch,
                 "controls_enabled": controlAllowed(context),
                 "window": active && binding == context.binding ? "shared" : "none",
-                "busy": lease != nil || cleanupPending != nil]
+                "busy": lease != nil || cleanupPending != nil, "screen_locked": screenLocked()]
             if let request = agentRequest, request.status == .pending {
                 result["request"] = ["id": request.id, "reason": request.reason, "remaining_sec": request.remaining(now())]
             }
@@ -454,6 +463,7 @@ final class PairingSession {
         locked {
             expire(); pruneControl()
             guard current(context), controlAllowed(context), (30...3600).contains(ttl), UUID(uuidString: operation) != nil else { return "rejected" }
+            if screenLocked() { return "screenLocked" }
             if let lease {
                 return lease.owner == context && lease.operation == operation && lease.ttl == ttl ? "ok" : "busy"
             }
@@ -464,12 +474,13 @@ final class PairingSession {
             leaseEpoch += 1
             lease = Lease(id: UUID().uuidString, epoch: leaseEpoch, owner: context,
                           deadline: min(now() + Double(ttl), session.deadline, pair.deadline), operation: operation, ttl: ttl)
+            emit("interact_granted", "lease_acquired")
             if let interactObserver { deferred.append { interactObserver(true) } }
             return "ok"
         }
     }
     func cancelInput(_ context: Context, id: String, epoch: Int) {
-        locked { if let lease, lease.owner == context, lease.id == id, lease.epoch == epoch { revokeLease("rejectedInput") } }
+        locked { if let lease, lease.owner == context, lease.id == id, lease.epoch == epoch { if screenLocked() { revokeLease("screenLocked") } else { revokeLease("rejectedInput") } } }
     }
     func release(_ context: Context, id: String, epoch: Int, decision: String) -> String {
         locked {
@@ -529,6 +540,7 @@ final class PairingSession {
                   frameProvenance?.epoch == geometryEpoch,
                   sequence > 0, sequence <= 9_007_199_254_740_991,
                   sequence > value.sequence || (sequence == value.sequence && value.execution == execution) else { return false }
+            if screenLocked() { revokeLease("screenLocked"); return false }
             if !controlAllowed(context) { revokeLease("controlNotAllowed"); return false }
             value.sequence = sequence; value.execution = execution; lease = value
             return effect()

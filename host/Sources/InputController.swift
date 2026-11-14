@@ -7,6 +7,10 @@ private func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePo
 
 /// All calls are main-queue confined. No native mutation is allowed without a submission gate.
 final class InputController {
+    static func screenLocked() -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
+        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
+    }
     typealias Gate = (() -> Bool) -> Bool
     final class Diagnostic {
         enum Stage: String {
@@ -320,26 +324,28 @@ final class InputController {
     }
     /// Release-only, never gated: a modifier goes up as a flagsChanged with no flags (a plain key-up keeps the flag).
     private func releaseKey(_ code: CGKeyCode) -> Bool {
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return false }
+        guard !Self.screenLocked(), let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return false }
         if Self.modifierKeys.contains(where: { $0.code == code }) { event.type = .flagsChanged; event.flags = [] }
         event.post(tap: .cghidEventTap)
         heldKeys.remove(code)
         return true
     }
+    /// Run only releases for tracked downs; callbacks allow a no-injection regression test.
+    static func releaseTracked(buttons: [CGMouseButton: CGPoint], keys: Set<CGKeyCode>,
+                               releaseButton: (CGMouseButton, CGPoint) -> Bool, releaseKey: (CGKeyCode) -> Bool) -> Bool {
+        var success = true
+        for (button, point) in buttons { if !releaseButton(button, point) { success = false } }
+        for code in keys { if !releaseKey(code) { success = false } }
+        return success
+    }
     /// Only releases actually submitted downs; cleanup may run after authority is revoked.
     func cleanup() -> Bool {
         armed = false
-        var success = true
-        for (button, point) in heldButtons {
-            if let event = CGEvent(mouseEventSource: nil, mouseType: button == .right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: point, mouseButton: button) { event.post(tap: .cghidEventTap) }
-            else { success = false }
-        }
-        for code in heldKeys where !releaseKey(code) { success = false }
-        // Always end with a flagsChanged carrying no flags, even when nothing is tracked as held: the session flag
-        // state outlives our events (H1: Command read as held after the host exited).
-        if let reset = CGEvent(keyboardEventSource: nil, virtualKey: 55, keyDown: false) {
-            reset.type = .flagsChanged; reset.flags = []; reset.post(tap: .cghidEventTap)
-        } else { success = false }
+        guard !Self.screenLocked() || (heldButtons.isEmpty && heldKeys.isEmpty) else { return false }
+        let success = Self.releaseTracked(buttons: heldButtons, keys: heldKeys, releaseButton: { button, point in
+            guard let event = CGEvent(mouseEventSource: nil, mouseType: button == .right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: point, mouseButton: button) else { return false }
+            event.post(tap: .cghidEventTap); return true
+        }, releaseKey: { self.releaseKey($0) })
         if success { heldButtons.removeAll(); lastPoint = nil }
         return restore(gate: { $0() }) && success
     }
