@@ -61,15 +61,15 @@ func tick(_ seconds: Double) { // the 1 s expiry tick, deterministically
         for c in alive { if let nonce = identity.heartbeat(c) { _ = identity.pong(c, nonce: nonce) } }
     }
 }
-func viewer() -> (cookies: [String: String], context: PairingSession.Context) {
-    for c in alive { identity.disconnect(c) } // one phone page at a time
+func viewer(keep: Bool = false) -> (cookies: [String: String], context: PairingSession.Context) {
+    if !keep { for c in alive { identity.disconnect(c) } } // one phone page at a time unless asked
     let r = phone("POST", "/session", ["window_id": binding.windowID])
     precondition(r.status == 200)
     let kv = r.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
     let cookies = [kv[0]: kv[1]]
     let t = json(phone("POST", "/w/\(binding.windowID)/connect", [:], cookies))
     let context = identity.authenticate(ticket: t["ticket"] as! String, resource: t["resource"] as! String, cancel: {})!
-    alive = [context]
+    alive = keep ? alive + [context] : [context]
     return (cookies, context)
 }
 func request(_ timeout: Int = 300) -> String {
@@ -143,6 +143,33 @@ tick(12); expect([], "heartbeat still in time")
 tick(50); expect(["disconnected:connection_lost/heartbeat_timeout"], "heartbeat timeout")
 precondition(shareAlive(), "disconnected keeps the share")
 
+// The request id is the one current when the last viewer went, not when N ran out (request A ends, B starts meanwhile).
+binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain() // ends the pending request
+var rA = request(30); v = viewer(); _ = drain()
+identity.disconnect(v.context); alive = []
+tick(31); expect(["timeout:request_timeout"], "A times out during N")
+var rB = request(1800)
+tick(20); list = drain()
+precondition(kinds(list) == ["disconnected:connection_lost/connection_closed"] && list[0]["request_id"] as? String == rA && rA != rB, "attributed to A: \(list)")
+_ = reply("GET", "/agent/status")
+// No request when the viewer went: null, even if a request starts during N.
+binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
+v = viewer(); identity.disconnect(v.context); alive = []; tick(2)
+rB = request(1800); tick(45); list = drain()
+precondition(kinds(list) == ["disconnected:connection_lost/connection_closed"] && list[0]["request_id"] is NSNull, "no request at loss: \(list)")
+
+// Several viewers: only the last one to go decides.
+var first = viewer(), second = viewer(keep: true); _ = drain()
+precondition(phone("POST", "/session/close", [:], first.cookies).status == 200); alive = [second.context]
+tick(50); expect([], "another viewer is still connected")
+identity.disconnect(second.context); alive = []
+tick(46); expect(["disconnected:connection_lost/connection_closed"], "last viewer dropped silently")
+first = viewer(); second = viewer(keep: true); _ = drain()
+identity.disconnect(second.context); alive = [first.context]; tick(5)
+precondition(phone("POST", "/session/close", [:], first.cookies).status == 200); alive = []
+tick(46); expect(["left:stop_watching"], "last viewer said it left")
+_ = rA; _ = rB
+
 // N is configurable.
 PairingSession.leaveGrace = 5
 v = viewer(); _ = drain(); identity.disconnect(v.context); alive = []
@@ -154,7 +181,7 @@ precondition(reply("POST", "/agent/request", ["reason": "x", "timeout_sec": 30])
 v = viewer(); _ = drain()
 identity.revokeWindow()
 list = drain()
-precondition(kinds(list) == ["cancelled:share_ended", "share_ended:revokeWindow"] && list.allSatisfy { $0["request_id"] as? String == id }, "\(kinds(list))")
+precondition(kinds(list) == ["cancelled:share_ended", "share_ended:revokeWindow"] && list.allSatisfy { $0["request_id"] as? String == rB }, "\(kinds(list))")
 tick(60); expect([], "no disconnected after the share ended")
 
 // Repeated subscriptions: reading never consumes; same cursor, same events, for every reader.
@@ -169,7 +196,7 @@ binding = identity.selectWindow(); precondition(identity.activate(binding))
 for _ in 0..<40 { _ = request(); _ = reply("GET", "/agent/status"); identity.revokeWindow(); binding = identity.selectWindow(); precondition(identity.activate(binding)) }
 let old = json(reply("GET", "/agent/events/0"))
 precondition((old["events"] as! [Any]).count == PairingSession.eventRetention && old["truncated"] as? Bool == true, "retention")
-print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, only done revokes")
+print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, only done revokes, request id from loss time, last viewer decides")
 '''
 
 HTTP = r'''import Foundation
@@ -192,6 +219,10 @@ def main():
         out = subprocess.run([str(d / "unit")], check=True, stdout=subprocess.PIPE, text=True, timeout=60).stdout
         assert 'SECRET' not in out and TOKEN not in out, 'event log lines carry nothing sensitive'
         print(out.strip().splitlines()[-1])
+        # The event log line is printed after the lock is released (a slow stdout pipe must not stall frames and input).
+        src = (ROOT / 'host/Sources/PairingSession.swift').read_text()
+        emit = src[src.index('private func emit('):src.index('private func finishRequest(')]
+        assert 'deferred.append { print("[agent] event' in emit and emit.count('print(') == 1, 'event log outside the lock'
 
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
@@ -221,6 +252,12 @@ def main():
             assert call('GET', '/agent/events/0', auth=None)[0] == 401
             assert call('GET', '/agent/events/0', auth='Bearer ' + 'cd' * 32)[0] == 401
             assert call('GET', '/agent/events/0', origin=f'http://127.0.0.1:{port}')[0] == 403
+            # The same parser gates as /agent/request: cookies, proxy headers, a non-loopback Host.
+            for extra in ({'Cookie': 'ws-session=x'}, {'Forwarded': 'for=1.2.3.4'}, {'X-Forwarded-For': '1.2.3.4'}, {'Host': f'100.1.2.3:{port}'}):
+                conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+                conn.request('GET', '/agent/events/0', None, {'Host': f'127.0.0.1:{port}', 'Authorization': 'Bearer ' + TOKEN, **extra})
+                r = conn.getresponse(); status = r.status; r.read(); conn.close()
+                assert status == 403, (extra, status)
             # Long poll: no event → 204 after about 3 s.
             started = time.monotonic(); status, _ = call('GET', '/agent/events/0')
             held = time.monotonic() - started
@@ -254,7 +291,17 @@ def main():
             assert call('GET', '/agent/events/1')[0] == 429
             for t in ws: t.join()
             assert results == [204] * 4, results
-            print('PASS HTTP: long poll 204 after ~3 s, two readers woken by the same left, auth refused before waiting, 5th waiter 429')
+            # Waiters that hang up early free their slot at the latest when their 3 s hold ends.
+            gone = []
+            for _ in range(4):
+                sock = socket.create_connection(('127.0.0.1', port))
+                sock.sendall(f'GET /agent/events/1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n'.encode())
+                gone.append(sock)
+            time.sleep(.3)
+            for sock in gone: sock.close()
+            time.sleep(3.5)
+            assert call('GET', '/agent/events/1')[0] == 204, 'slots released after hang-ups'
+            print('PASS HTTP: long poll 204 after ~3 s, two readers woken by the same left, auth/cookie/proxy/Host refused before waiting, 5th waiter 429, hung-up waiters release slots')
 
         finally:
             host.terminate(); host.wait()

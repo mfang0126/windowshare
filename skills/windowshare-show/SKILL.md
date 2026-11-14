@@ -63,7 +63,7 @@ description: Hand a step that needs a person (login, approval, tricky UI, a quic
 |---|---|
 | `seq` | 递增序号，本 host 进程内唯一 |
 | `kind` | `done`、`cancelled`、`timeout`、`left`、`disconnected`、`share_ended` |
-| `request_id` | 当前（或刚结束的）请求 id；没有请求时为 `null` |
+| `request_id` | `done`、`cancelled`、`timeout`、`share_ended`：当前（或刚结束的）请求 id；`left`、`disconnected`：最后一个观看端离开那一刻还在等待的请求 id（不是 N 秒到点时的）。没有时为 `null` |
 | `at` | Unix 秒（Mac 时钟） |
 | `reason` | 固定词，见下表 |
 | `hint` | 只有 `disconnected` 有，可选，不可当真 |
@@ -77,7 +77,7 @@ description: Hand a step that needs a person (login, approval, tricky UI, a quic
 | `disconnected` | 没收到离开信号，最后一个观看端的连接消失（心跳 15 秒超时或连接被关）后 N 秒仍没有连回来。关页、切后台、断网、休眠、App 被杀都是这一种，host 分不清 | `connection_lost`；`hint`：`heartbeat_timeout` / `connection_closed` | **不回收** |
 | `share_ended` | 共享结束（完成、菜单停止、12 小时、窗口关闭、睡眠锁屏、几何失败、换窗口……） | host 内部的结束原因词，如 `done`、`shareLimit`、`revokeWindow`、`geometryUnavailable`、`select` | 已结束 |
 
-N 默认 45 秒，环境变量 `WINDOWSHARE_LEAVE_SEC`（1–3600）可改，**待 Ming 定**。页面卸载信号是尽力而为（`fetch keepalive`），App 被杀、断网时发不出，这时只会有 `disconnected`；刷新页面会在 N 内连回来，不记事件。心跳超时要先等 15 秒才算连接消失，所以断网到 `disconnected` 约 15 + N 秒。
+有多个观看端时只看最后一个离开的：它发了离开信号记 `left`，否则记 `disconnected`；还有观看端连着就什么都不记。N 默认 45 秒，环境变量 `WINDOWSHARE_LEAVE_SEC`（1–3600）可改，**待 Ming 定**。页面卸载信号是尽力而为（`fetch keepalive`），App 被杀、断网时发不出，这时只会有 `disconnected`；刷新页面会在 N 内连回来，不记事件。心跳超时要先等 15 秒才算连接消失，所以断网到 `disconnected` 约 15 + N 秒。
 
 收到事件只当「状态可能变了」：回收前再 `GET /agent/request/<id>` 确认，并核对 `request_id` 是自己的。`left`、`disconnected` 不代表人做完了，也不代表失败，由你决定重发链接、继续等还是结束共享。原来的 `GET /agent/request/<id>` 和 2 秒轮询不变。
 

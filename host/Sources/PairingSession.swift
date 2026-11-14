@@ -133,6 +133,7 @@ final class PairingSession {
     private var viewerGoneAt: TimeInterval?
     private var leaveReason: String?
     private var lossHint = "connection_closed"
+    private var goneRequest: String? // the request pending when the last viewer went (not when N ran out), else nil
     private var agentWindow: [String: Any]?
     private var interactObserver: ((Bool) -> Void)?
     /// Told (outside the lock) whenever a lease starts or ends, so capture can tune itself for Interact (M2-a).
@@ -363,14 +364,14 @@ final class PairingSession {
             return context
         }
     }
-    private func emit(_ kind: String, _ reason: String, hint: String? = nil) {
+    private func emit(_ kind: String, _ reason: String, hint: String? = nil, request: String?? = nil) {
         eventSeq += 1
         var body: [String: Any] = ["seq": eventSeq, "kind": kind, "reason": reason,
-                                   "at": Date().timeIntervalSince1970, "request_id": agentRequest?.id ?? NSNull()]
+                                   "at": Date().timeIntervalSince1970, "request_id": (request ?? agentRequest?.id) ?? NSNull()]
         if let hint { body["hint"] = hint }
         events.append((eventSeq, body))
         if events.count > Self.eventRetention { events.removeFirst() }
-        print("[agent] event kind=\(kind) reason=\(reason)") // same fields as the event: nothing sensitive
+        deferred.append { print("[agent] event kind=\(kind) reason=\(reason)") } // after unlock; nothing sensitive
     }
     private func finishRequest(_ status: AgentRequest.Status, _ reason: String) {
         guard agentRequest?.status == .pending else { return }
@@ -378,16 +379,20 @@ final class PairingSession {
         emit(status.rawValue, reason)
     }
     /// Runs after every locked call (and the 1 s expiry tick). A viewer counts as present while it has a live control
-    /// connection. Neither `left` nor `disconnected` revokes anything: the share, link and capture stay (only `done` ends it).
+    /// connection; with several viewers only the last one to go decides: `left` if it sent a leave signal, else
+    /// `disconnected`. Neither revokes anything: the share, link and capture stay (only `done` ends it).
     /// `disconnected` cannot tell a closed page from a dead network; its `hint` is only what the host last saw.
     private func trackPresence() {
         guard active, binding != nil else { return }
         if !connections.isEmpty { viewerSeen = true; viewerGoneAt = nil; leaveReason = nil; return }
         guard viewerSeen else { return }
         let time = now()
-        guard let gone = viewerGoneAt else { viewerGoneAt = time; return }
+        guard let gone = viewerGoneAt else {
+            viewerGoneAt = time; goneRequest = agentRequest?.status == .pending ? agentRequest?.id : nil; return
+        }
         guard time - gone >= Self.leaveGrace else { return }
-        if let leaveReason { emit("left", leaveReason) } else { emit("disconnected", "connection_lost", hint: lossHint) }
+        if let leaveReason { emit("left", leaveReason, request: .some(goneRequest)) }
+        else { emit("disconnected", "connection_lost", hint: lossHint, request: .some(goneRequest)) }
         viewerSeen = false; viewerGoneAt = nil; leaveReason = nil
     }
     /// True once the share this viewer authenticated for is over (window cleared or replaced), as opposed to a
