@@ -134,6 +134,11 @@ leave(v, "unload")
 tick(10); v = viewer(); tick(60); expect([], "reload within N is not a leave")
 leave(v, "unload")
 tick(46); expect(["left:page_unload"], "page unload")
+// 「停止观看」 when the HTTP close is handled before the socket's leave message: still left.
+v = viewer(); _ = drain()
+precondition(phone("POST", "/session/close", [:], v.cookies).status == 200); alive = []
+identity.leave(v.context, source: "stop"); identity.disconnect(v.context)
+tick(46); expect(["left:stop_watching"], "HTTP close first")
 // A leave from a connection that is already gone (or never was) changes nothing.
 v = viewer(); _ = drain(); let stale = v.context; identity.disconnect(stale); alive = []
 identity.leave(stale, source: "stop"); tick(46); expect(["disconnected:connection_lost/connection_closed"], "leave after the socket closed")
@@ -217,7 +222,7 @@ binding = identity.selectWindow(); precondition(identity.activate(binding))
 for _ in 0..<40 { _ = request(); _ = reply("GET", "/agent/status"); identity.revokeWindow(); binding = identity.selectWindow(); precondition(identity.activate(binding)) }
 let old = json(reply("GET", "/agent/events/0"))
 precondition((old["events"] as! [Any]).count == PairingSession.eventRetention && old["truncated"] as? Bool == true, "retention")
-print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, leave bound to its own connection, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, only done revokes, request id from loss time, last viewer decides")
+print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, leave bound to its own connection, HTTP close before socket leave, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, only done revokes, request id from loss time, last viewer decides")
 '''
 
 HTTP = r'''import Foundation
