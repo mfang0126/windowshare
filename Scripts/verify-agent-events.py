@@ -72,6 +72,12 @@ func viewer(keep: Bool = false) -> (cookies: [String: String], context: PairingS
     alive = keep ? alive + [context] : [context]
     return (cookies, context)
 }
+/// What the page does: a `leave` message on its own control socket, the socket closes, then /session/close.
+func leave(_ v: (cookies: [String: String], context: PairingSession.Context), _ source: String) {
+    identity.leave(v.context, source: source); identity.disconnect(v.context)
+    _ = phone("POST", "/session/close", [:], v.cookies)
+    alive.removeAll { $0 == v.context }
+}
 func request(_ timeout: Int = 300) -> String {
     let r = reply("POST", "/agent/request", ["reason": secretReason, "timeout_sec": timeout])
     precondition(r.status == 201)
@@ -115,7 +121,7 @@ precondition(shareAlive(), "timeout keeps the share")
 
 // left, explicit 「停止观看」: recorded only after N with no viewer, share kept.
 id = request(1800) // outlives every step below
-precondition(phone("POST", "/session/close", [:], v.cookies).status == 200); alive = []
+leave(v, "stop")
 tick(40); expect([], "before N")
 tick(6); list = drain()
 precondition(kinds(list) == ["left:stop_watching"] && list[0]["request_id"] as? String == id, "\(kinds(list))")
@@ -124,12 +130,13 @@ tick(60); expect([], "left is recorded once")
 
 // left, page unload signal; a reload (new viewer) within N records nothing.
 v = viewer(); _ = drain()
-precondition(phone("POST", "/session/close", ["source": "unload"], v.cookies).status == 200); alive = []
+leave(v, "unload")
 tick(10); v = viewer(); tick(60); expect([], "reload within N is not a leave")
-precondition(phone("POST", "/session/close", ["source": "unload"], v.cookies).status == 200); alive = []
+leave(v, "unload")
 tick(46); expect(["left:page_unload"], "page unload")
-precondition(phone("POST", "/session/close", ["source": "other"], viewer().cookies).status == 400, "unknown source")
-tick(2); _ = drain()
+// A leave from a connection that is already gone (or never was) changes nothing.
+v = viewer(); _ = drain(); let stale = v.context; identity.disconnect(stale); alive = []
+identity.leave(stale, source: "stop"); tick(46); expect(["disconnected:connection_lost/connection_closed"], "leave after the socket closed")
 
 // disconnected, socket closed without a leave signal (closed tab, killed app, lost network: not told apart).
 v = viewer(); _ = drain()
@@ -160,14 +167,20 @@ precondition(kinds(list) == ["disconnected:connection_lost/connection_closed"] &
 
 // Several viewers: only the last one to go decides.
 var first = viewer(), second = viewer(keep: true); _ = drain()
-precondition(phone("POST", "/session/close", [:], first.cookies).status == 200); alive = [second.context]
+leave(first, "stop")
 tick(50); expect([], "another viewer is still connected")
 identity.disconnect(second.context); alive = []
 tick(46); expect(["disconnected:connection_lost/connection_closed"], "last viewer dropped silently")
 first = viewer(); second = viewer(keep: true); _ = drain()
 identity.disconnect(second.context); alive = [first.context]; tick(5)
-precondition(phone("POST", "/session/close", [:], first.cookies).status == 200); alive = []
+leave(first, "stop")
 tick(46); expect(["left:stop_watching"], "last viewer said it left")
+// A session that never connected cannot relabel another viewer's silent drop (it has no connection to leave from).
+v = viewer(); _ = drain(); identity.disconnect(v.context); alive = []; tick(5)
+let other = phone("POST", "/session", ["window_id": binding.windowID])
+let okv = other.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
+precondition(phone("POST", "/session/close", [:], [okv[0]: okv[1]]).status == 200)
+tick(41); expect(["disconnected:connection_lost/connection_closed"], "unconnected close does not turn a drop into left")
 _ = rA; _ = rB
 
 // A page that closes without ever connecting a viewer records nothing.
@@ -204,7 +217,7 @@ binding = identity.selectWindow(); precondition(identity.activate(binding))
 for _ in 0..<40 { _ = request(); _ = reply("GET", "/agent/status"); identity.revokeWindow(); binding = identity.selectWindow(); precondition(identity.activate(binding)) }
 let old = json(reply("GET", "/agent/events/0"))
 precondition((old["events"] as! [Any]).count == PairingSession.eventRetention && old["truncated"] as? Bool == true, "retention")
-print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, only done revokes, request id from loss time, last viewer decides")
+print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, leave bound to its own connection, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, only done revokes, request id from loss time, last viewer decides")
 '''
 
 HTTP = r'''import Foundation
@@ -219,6 +232,50 @@ try server.start(port: UInt16(CommandLine.arguments[1])!)
 RunLoop.main.run()
 '''
 
+# Production ControlServer + HTTPServer: a viewer's `leave` message over its real control WebSocket, then the close.
+WS = r'''import Foundation
+PairingSession.leaveGrace = 1
+let port = UInt16(CommandLine.arguments[1])!
+let identity = PairingSession()
+let config = try! EntryConfiguration(port: port)
+let control = ControlServer(configuration: config, input: nil, identity: identity)
+try! control.start()
+let http = HTTPServer(identity: identity); try! http.start(configuration: config)
+identity.configureAgent(token: String(repeating: "ab", count: 32), entry: "http://localhost:\(port)/")
+let binding = identity.selectWindow(); precondition(identity.activate(binding))
+DispatchQueue.global().async {
+    while readLine() != nil { // one fresh viewer (session + ticket) per line
+        var r = PairingSession.Reply(status: 0, body: Data())
+        identity.respond(method: "POST", path: "/session", fields: ["window_id": binding.windowID], cookies: [:]) { r = $0 }
+        let cookie = String(r.cookies[0].split(separator: ";")[0].dropFirst("ws-session=".count))
+        identity.respond(method: "POST", path: "/w/\(binding.windowID)/connect", fields: [:], cookies: ["ws-session": cookie]) { r = $0 }
+        print(String(decoding: r.body, as: UTF8.self)); fflush(stdout)
+    }
+}
+RunLoop.main.run()
+'''
+
+def ws_viewer(proc, cport, hport):
+    import base64, struct
+    proc.stdin.write('next\n'); proc.stdin.flush()
+    line = proc.stdout.readline()
+    while not line.startswith('{'): line = proc.stdout.readline()  # skip the listeners' ready lines
+    ticket = json.loads(line)
+    s = socket.create_connection(('127.0.0.1', cport), timeout=5)
+    s.sendall((f'GET {ticket["resource"]} HTTP/1.1\r\nHost: localhost:{cport}\r\nOrigin: http://localhost:{hport}\r\nUpgrade: websocket\r\n'
+               f'Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {base64.b64encode(os.urandom(16)).decode()}\r\n\r\n').encode())
+    head = b''
+    while not head.endswith(b'\r\n\r\n'): head += s.recv(1)
+    assert head.startswith(b'HTTP/1.1 101'), head
+    def send(obj, op=0x81):
+        data = json.dumps(obj).encode() if obj is not None else struct.pack('!H', 1000)
+        mask = os.urandom(4)
+        size = bytes([0x80 | len(data)]) if len(data) < 126 else bytes([0x80 | 126]) + struct.pack('!H', len(data))
+        s.sendall(bytes([op]) + size + mask + bytes(v ^ mask[i % 4] for i, v in enumerate(data)))
+    send({'t': 'auth', 'ticket': ticket['ticket'], 'resource': ticket['resource']})
+    first = s.recv(64); assert first and first[0] & 15 == 1, ('state frame after auth', first)
+    return s, send
+
 def main():
     with tempfile.TemporaryDirectory(prefix='windowshare-events-') as directory:
         d = Path(directory)
@@ -231,6 +288,11 @@ def main():
         src = (ROOT / 'host/Sources/PairingSession.swift').read_text()
         emit = src[src.index('private func emit('):src.index('private func finishRequest(')]
         assert 'print(' not in emit and 'fputs(' not in emit, 'no log line in emit'
+        # The page sends the leave signal on its control socket before clear() closes it; the host accepts only stop/unload.
+        page = (ROOT / 'host/Sources/ViewerPage.swift').read_text()
+        assert "raw({t:'leave',source:'unload'});clear('会话已离开')" in page and "raw({t:'leave',source:'stop'});clear('已停止观看')" in page
+        control = (ROOT / 'host/Sources/ControlServer.swift').read_text()
+        assert 'guard exact(["t", "source"]), let source = object["source"] as? String, ["stop", "unload"].contains(source)' in control
 
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
@@ -313,5 +375,43 @@ def main():
 
         finally:
             host.terminate(); host.wait()
+
+        # Real control WebSocket: leave message then close → left; close alone → disconnected (N = 1 s here).
+        (d / 'main.swift').write_text(WS)
+        subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift', 'ControlServer.swift']],
+                        str(d / 'main.swift'), '-o', str(d / 'ws')], check=True)
+        for _ in range(20):
+            with socket.socket() as a, socket.socket() as b:
+                hport = 30001 + int.from_bytes(os.urandom(2), 'big') % 9000
+                try: a.bind(('127.0.0.1', hport)); b.bind(('127.0.0.1', hport + 1)); break
+                except OSError: continue
+        proc = subprocess.Popen([str(d / 'ws'), str(hport)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        def feed(after, wait):
+            until = time.monotonic() + wait
+            while time.monotonic() < until:
+                try:
+                    conn = http.client.HTTPConnection('127.0.0.1', hport, timeout=6)
+                    conn.request('GET', f'/agent/events/{after}', None, {'Host': f'127.0.0.1:{hport}', 'Authorization': 'Bearer ' + TOKEN})
+                    r = conn.getresponse(); body = r.read(); conn.close()
+                except OSError: time.sleep(.1); continue
+                if r.status == 200: return json.loads(body)
+            raise AssertionError(f'no event after {after}')
+        try:
+            cursor = 0
+            for leave, want in ((True, ('left', 'stop_watching')), (False, ('disconnected', 'connection_lost')), (True, ('left', 'stop_watching'))):
+                s, send = ws_viewer(proc, hport + 1, hport)
+                time.sleep(.3)
+                if leave: send({'t': 'leave', 'source': 'stop'})
+                send(None, op=0x88)
+                try:  # closing handshake like a browser: read until the host closes, so no RST drops the leave frame
+                    while s.recv(4096): pass
+                except OSError: pass
+                s.close()
+                got = feed(cursor, 8)
+                assert [(e['kind'], e['reason']) for e in got['events']] == [want], (leave, got)
+                cursor = got['next']
+            print('PASS WebSocket: leave message on the real control socket then close → left; close alone → disconnected')
+        finally:
+            proc.kill(); proc.wait()
 
 main()

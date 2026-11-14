@@ -260,8 +260,9 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   window.addEventListener('blur',()=>{if(wanted)leave('页面失去焦点，已返回 View');});
   document.addEventListener('visibilitychange',()=>{if(document.hidden)clear('后台已暂停控制');else if(!stopped)recover();});
   window.addEventListener('online',()=>{if(!stopped)recover();});
-  // Leave signal for the Bot (`left`): best effort, may never arrive (killed app, no network); a reload rejoins within N and records nothing.
-  window.addEventListener('pagehide',()=>{if(binding&&!stopped)try{fetch('/session/close',{method:'POST',keepalive:true,credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{"source":"unload"}'}).catch(()=>{});}catch(e){}clear('会话已离开');});
+  // Leave signal for the Bot (`left`), sent on the control socket just before clear() closes it: best effort, never sent
+  // by a killed app or without network; a reload rejoins within N and records nothing.
+  window.addEventListener('pagehide',()=>{raw({t:'leave',source:'unload'});clear('会话已离开');});
   window.addEventListener('resize',()=>{if(pointer)leave('视口改变，手势已取消');drawCursor();});
   window.visualViewport?.addEventListener('resize',()=>{if(pointer)leave('视口改变，手势已取消');});
   function action(id,fn){el(id).onclick=async()=>{if(busy)return;busy=true;try{await fn();}catch(e){clear(e.message);}finally{busy=false;}};}
@@ -274,7 +275,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
     history.replaceState(null,'',base());watch();
   }
   action('retry',async()=>{stopped=false;await openView();});
-  action('close',async()=>{stopped=true;el('text').value='';clearTimeout(reconnectTimer);clear('已停止观看');await api('/session/close',{});});
+  action('close',async()=>{stopped=true;el('text').value='';clearTimeout(reconnectTimer);raw({t:'leave',source:'stop'});clear('已停止观看');await api('/session/close',{});});
   render();
   openView().catch(e=>recover(e.message));
 })();

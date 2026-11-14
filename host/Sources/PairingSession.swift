@@ -131,7 +131,8 @@ final class PairingSession {
         .flatMap(Double.init).flatMap { (1...3600).contains($0) ? $0 : nil } ?? 45
     private var viewerSeen = false
     private var viewerGoneAt: TimeInterval?
-    private var leaveReason: String?
+    private var leaveReason: String? // of the connection removed last; nil when it went without a leave signal
+    private var leaveSignals: [String: String] = [:] // connection id → leave reason it sent before closing
     private var lossHint = "connection_closed"
     private var goneRequest: String? // the request pending when the last viewer went (not when N ran out), else nil
     private var agentWindow: [String: Any]?
@@ -333,6 +334,7 @@ final class PairingSession {
         }
         for (id, connection) in connections where !current(connection.context) {
             lossHint = now() - connection.pongAt >= 15 ? "heartbeat_timeout" : "connection_closed"
+            leaveReason = leaveSignals.removeValue(forKey: id)
             connections[id] = nil
             sessions[connection.session] = nil
             deferred.append(connection.cancel)
@@ -355,7 +357,7 @@ final class PairingSession {
                   valid(Stream(session: issued.session, binding: session.binding, cancel: {})) else { return nil }
             for (id, old) in connections where old.session == issued.session {
                 if lease?.owner == old.context { revokeLease("reconnect") }
-                connections[id] = nil; deferred.append(old.cancel)
+                connections[id] = nil; leaveSignals[id] = nil; deferred.append(old.cancel)
             }
             let context = Context(principalID: pair.principal, pairingID: pair.id, sessionID: session.id,
                                   connectionID: UUID().uuidString, sessionEpoch: sessionEpoch, binding: session.binding)
@@ -383,7 +385,7 @@ final class PairingSession {
     /// `disconnected` cannot tell a closed page from a dead network; its `hint` is only what the host last saw.
     private func trackPresence() {
         guard active, binding != nil else { return }
-        if !connections.isEmpty { viewerSeen = true; viewerGoneAt = nil; leaveReason = nil; return }
+        if !connections.isEmpty { viewerSeen = true; viewerGoneAt = nil; return }
         guard viewerSeen else { return }
         let time = now()
         guard let gone = viewerGoneAt else {
@@ -397,6 +399,14 @@ final class PairingSession {
     /// True once the share this viewer authenticated for is over (window cleared or replaced), as opposed to a
     /// dropped connection or an expired session of a share that is still running.
     func shareEnded(_ context: Context) -> Bool { locked { binding != context.binding } }
+    /// The viewer says it is leaving (「停止观看」 or page unload), on its own control connection right before closing it,
+    /// so the signal belongs to that connection and arrives ahead of the close. Best effort: a killed app sends nothing.
+    func leave(_ context: Context, source: String) {
+        locked {
+            guard connections[context.connectionID]?.context == context else { return }
+            leaveSignals[context.connectionID] = source == "unload" ? "page_unload" : "stop_watching"
+        }
+    }
     func disconnect(_ context: Context) {
         locked {
             guard let connection = connections[context.connectionID], connection.context == context else { return }
@@ -581,10 +591,8 @@ final class PairingSession {
                 }
                 return .json(200, ["status": agentRequest!.status.rawValue])
             case "/session/close":
-                // 「停止观看」 sends {}; the page sends {"source":"unload"} on pagehide (best effort, may never arrive).
-                guard exact([]) || (exact(["source"]) && fields["source"] as? String == "unload") else { return error(400) }
+                guard exact([]) else { return error(400) }
                 guard let sessionKey, sessions.removeValue(forKey: sessionKey) != nil else { return error(401) }
-                if active { leaveReason = fields.isEmpty ? "stop_watching" : "page_unload" } // counts only after a viewer connected
                 frame = nil; size = []
                 var reply = Reply.json(200, ["status": "closed"]); if authorization == nil { reply.cookies = [Self.cookie("session")] }; return reply
             default:
