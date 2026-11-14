@@ -9,7 +9,7 @@ private func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePo
 final class InputController {
     static func screenLocked() -> Bool {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
-        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
+        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? true
     }
     typealias Gate = (() -> Bool) -> Bool
     final class Diagnostic {
@@ -198,6 +198,7 @@ final class InputController {
                 diagnostic?.stage = .hit
                 guard self.hit(point) else { return false }
             }
+            guard !Self.screenLocked() else { return false }
             event.post(tap: .cghidEventTap)
             diagnostic?.stage = .effectPosted
             if type == .leftMouseDown || type == .rightMouseDown { diagnostic?.postedDown += 1 }
@@ -265,7 +266,7 @@ final class InputController {
                   let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
                                       wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0) else { return false }
             event.location = point
-            return gate { guard self.hit(point) else { return false }; event.post(tap: .cghidEventTap); return true }
+            return gate { guard self.hit(point), !Self.screenLocked() else { return false }; event.post(tap: .cghidEventTap); return true }
         }
         if type == "key" || type == "text" {
             let code = type == "key" ? Self.keys[object["key"] as! String]! : 0
@@ -287,7 +288,7 @@ final class InputController {
                     }
                     // Residual risk: focus can change between this check and the post; at most one event lands elsewhere.
                     guard gate({
-                        guard self.focused() else { return false }
+                        guard self.focused(), !Self.screenLocked() else { return false }
                         event.post(tap: .cghidEventTap)
                         if step.down { self.heldKeys.insert(step.code); pressed.append(step.code) } else { self.heldKeys.remove(step.code) }
                         return true
@@ -313,19 +314,21 @@ final class InputController {
     }
     private func restore(gate: Gate) -> Bool {
         guard let saved = savedFrame else { return true }
-        defer { savedFrame = nil; setFrame = nil }
-        guard let setFrame, liveRect() == setFrame, let element = target() else { return true }
+        guard let setFrame, liveRect() == setFrame, let element = target() else { savedFrame = nil; self.setFrame = nil; return true }
         var size = saved.size
         guard let value = AXValueCreate(.cgSize, &size) else { return false }
-        return gate {
+        let restored = gate {
             guard self.liveRect() == setFrame, let current = self.target(), CFEqual(current, element) else { return false }
             return AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, value) == .success
         }
+        if restored { savedFrame = nil; self.setFrame = nil }
+        return restored
     }
     /// Release-only, never gated: a modifier goes up as a flagsChanged with no flags (a plain key-up keeps the flag).
     private func releaseKey(_ code: CGKeyCode) -> Bool {
         guard !Self.screenLocked(), let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return false }
         if Self.modifierKeys.contains(where: { $0.code == code }) { event.type = .flagsChanged; event.flags = [] }
+        guard !Self.screenLocked() else { return false }
         event.post(tap: .cghidEventTap)
         heldKeys.remove(code)
         return true
@@ -341,10 +344,11 @@ final class InputController {
     /// Only releases actually submitted downs; cleanup may run after authority is revoked.
     func cleanup() -> Bool {
         armed = false
-        guard !Self.screenLocked() || (heldButtons.isEmpty && heldKeys.isEmpty) else { return false }
+        guard !Self.screenLocked() || (heldButtons.isEmpty && heldKeys.isEmpty && savedFrame == nil) else { return false }
         let success = Self.releaseTracked(buttons: heldButtons, keys: heldKeys, releaseButton: { button, point in
-            guard let event = CGEvent(mouseEventSource: nil, mouseType: button == .right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: point, mouseButton: button) else { return false }
-            event.post(tap: .cghidEventTap); return true
+            guard !Self.screenLocked(), let event = CGEvent(mouseEventSource: nil, mouseType: button == .right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: point, mouseButton: button) else { return false }
+            guard !Self.screenLocked() else { return false }
+            event.post(tap: .cghidEventTap); self.heldButtons[button] = nil; return true
         }, releaseKey: { self.releaseKey($0) })
         if success { heldButtons.removeAll(); lastPoint = nil }
         return restore(gate: { $0() }) && success

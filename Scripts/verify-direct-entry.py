@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = r'''import Network
 import Foundation
 var clock = 100.0
-let identity = PairingSession(now: { clock })
+let identity = PairingSession(now: { clock }, screenLocked: { false })
 let binding = identity.selectWindow()
 precondition(identity.activate(binding))
 var cleanup: Int?
@@ -146,7 +146,7 @@ precondition(lanCfg.entries().allSatisfy { $0.hasPrefix("http://") && $0.hasSuff
 // --- agent request interface (offline; fake clock) ---
 do {
     var t = 1000.0
-    let s = PairingSession(now: { t })
+    let s = PairingSession(now: { t }, screenLocked: { false })
     s.installCleanup { _ in }
     let tok = String(repeating: "ab", count: 32)
     s.configureAgent(token: tok, entry: "http://localhost:20861/")
@@ -376,7 +376,7 @@ with tempfile.TemporaryDirectory(prefix='windowshare-direct-') as directory:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
     server = r'''import Foundation
-let identity = PairingSession()
+let identity = PairingSession(screenLocked: { false })
 let binding = identity.selectWindow()
 precondition(identity.activate(binding))
 identity.configureAgent(token: String(repeating: "ab", count: 32), entry: "http://localhost:\(CommandLine.arguments[1])/")
@@ -473,7 +473,7 @@ RunLoop.main.run()
         (d / 'probe').mkdir()
         probe = d / 'probe' / 'main.swift'
         probe.write_text('import Foundation\nlet c = try! EntryConfiguration(port: 20871)\n'
-                         'let s = ControlServer(configuration: c, input: nil, identity: PairingSession())\ntry! s.start()\nprint("ready"); fflush(stdout)\n'
+                         'let s = ControlServer(configuration: c, input: nil, identity: PairingSession(screenLocked: { false }))\ntry! s.start()\nprint("ready"); fflush(stdout)\n'
                          'withExtendedLifetime(s) { dispatchMain() }\n')
         subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in sources + ['ControlServer.swift']], str(probe), '-o', str(d / 'probe' / 'bin')], check=True)
         p2 = subprocess.Popen([str(d / 'probe' / 'bin')], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)

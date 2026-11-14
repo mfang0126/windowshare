@@ -33,7 +33,7 @@
 >
 > 拟议文字，替换上面「agent 交接协议的扩展」「推送通知」两项：
 >
-> - **交接结果通知 Bot（拟纳入）**：host 可以把交接结果主动告诉本机 Bot，不只靠轮询。事件只有 `done`、`cancelled`、`timeout`、`left`、`disconnected`、`share_started`、`interact_granted`、`interact_revoked`、`share_ended`，每条只带请求 id、时间、原因，不带窗口标题、画面、链接、口令；只走本机 loopback + Bearer，不对手机或网络开放。手机明确上报的（「完成」「取消」、离开信号）和原因不明的断连分开记，不承诺分清关页和断网。只有「完成」立即回收资源；离开、断连都不自动回收，由 Bot 决定。离开 / 断连的判定时间 N 待定（草稿实现默认 45 秒）。
+> - **交接结果通知 Bot（已实现，待 Ming 拍板）**：host 可以把交接结果主动告诉本机 Bot，不只靠轮询。事件只有 `done`、`cancelled`、`timeout`、`left`、`disconnected`、`share_started`、`interact_granted`、`interact_revoked`、`share_ended`，每条只带请求 id、时间、原因，不带窗口标题、画面、链接、口令；只走本机 loopback + Bearer，不对手机或网络开放。手机明确上报的（「完成」「取消」、离开信号）和原因不明的断连分开记，不承诺分清关页和断网。只有「完成」立即回收资源；离开、断连都不自动回收，由 Bot 决定。离开 / 断连的判定时间 N 待定（草稿实现默认 45 秒）。
 > - **推送通知（待定，确认前仍不做）**：向手机推送（Bot 把共享页推到手机、手机在后台时提醒）是否纳入、走哪条路（Tailscale 长连接、FCM、Web Push）、要不要原生 Android 应用、长期设备配对，逐项等 Ming 确认。
 >
 > 拍板后：删掉本草稿块，把结论写进上面一段并注明日期。

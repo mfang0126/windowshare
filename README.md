@@ -99,6 +99,7 @@ python3 Scripts/verify-windowshare-show.py
 python3 Scripts/verify-host-close.py
 python3 Scripts/verify-geometry-diagnostics.py
 python3 Scripts/verify-agent-events.py
+python3 Scripts/verify-v1-matrix.py
 ```
 
 The old `Scripts/verify-morning.sh` checked `/status.json` and `/snapshot.jpg`, which no longer exist; it was removed on 2026-11-13. To check whether the host is running and what it shares, use `Scripts/windowshare status --json`.

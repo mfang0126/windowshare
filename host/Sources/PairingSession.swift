@@ -71,6 +71,9 @@ final class PairingSession {
     private var leaseEpoch = 0
     private var cleanupSerial = 0
     private var cleanupFailed = false
+    private var cleanupRetryAt: TimeInterval = 0
+    private var cleanupFailures = 0
+    private var cleanupPersistentFailure = false
     private var cleanupWaitsForUnlock = false
     private func controlAllowed(_ context: Context) -> Bool {
         active && binding == context.binding
@@ -108,6 +111,7 @@ final class PairingSession {
     private var pairs: [String: Pair] = [:]
     private var sessions: [String: Session] = [:]
     private var expiryTimer: DispatchSourceTimer?
+    private var unlockObserver: NSObjectProtocol?
     private var agentToken: String?
     private var agentEntry = ""
     private var agentEntries: [String] = []
@@ -142,7 +146,7 @@ final class PairingSession {
     /// Told (outside the lock) whenever a lease starts or ends, so capture can tune itself for Interact (M2-a).
     func observeInteract(_ observer: ((Bool) -> Void)?) { locked { interactObserver = observer } }
 
-    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, screenLocked: @escaping () -> Bool = { false }) {
+    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, screenLocked: @escaping () -> Bool = InputController.screenLocked) {
         self.now = now
         self.screenLocked = screenLocked
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "windowshare.expiry"))
@@ -150,8 +154,14 @@ final class PairingSession {
         timer.setEventHandler { [weak self] in self?.locked { self?.expire() } }
         timer.resume()
         expiryTimer = timer
+        unlockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: nil
+        ) { [weak self] _ in self?.locked { self?.cleanupRetryAt = 0 } }
     }
-    deinit { expiryTimer?.cancel() }
+    deinit {
+        expiryTimer?.cancel()
+        if let unlockObserver { DistributedNotificationCenter.default().removeObserver(unlockObserver) }
+    }
 
     private func locked<T>(_ action: () -> T) -> T {
         lock.lock()
@@ -309,8 +319,21 @@ final class PairingSession {
     func finishCleanup(epoch: Int, success: @autoclosure () -> Bool) {
         locked {
             guard cleanupPending == epoch, !cleanupFailed else { return }
-            guard success() else { cleanupFailed = true; cleanupWaitsForUnlock = screenLocked(); return }
-            cleanupPending = nil
+            guard success() else {
+                cleanupFailed = true
+                cleanupWaitsForUnlock = screenLocked()
+                if !cleanupWaitsForUnlock {
+                    cleanupFailures += 1
+                    if cleanupFailures >= 3 && !cleanupPersistentFailure {
+                        cleanupPersistentFailure = true
+                        deferred.append { fputs("[session] cleanup failed repeatedly; restart WindowShare if recovery does not complete\n", stderr) }
+                        emit("interact_revoked", "cleanupFailed")
+                    }
+                }
+                cleanupRetryAt = now() + min(30, pow(2, Double(min(5, max(0, cleanupFailures - 1)))))
+                return
+            }
+            cleanupPending = nil; cleanupPersistentFailure = false; cleanupFailures = 0
         }
     }
     private func current(_ context: Context) -> Bool {
@@ -319,7 +342,7 @@ final class PairingSession {
         return valid(Stream(session: connection.session, binding: context.binding, cancel: {}))
     }
     private func scheduleCleanup() {
-        cleanupSerial += 1; cleanupPending = cleanupSerial; cleanupFailed = false; cleanupWaitsForUnlock = false
+        cleanupSerial += 1; cleanupPending = cleanupSerial; cleanupFailed = false; cleanupWaitsForUnlock = false; cleanupFailures = 0; cleanupPersistentFailure = false
         if let cleanupHandler { let epoch = cleanupSerial; deferred.append { cleanupHandler(epoch) } }
     }
     private func revokeLease(_ reason: StaticString) {
@@ -332,7 +355,7 @@ final class PairingSession {
         scheduleCleanup()
     }
     private func pruneControl() {
-        if cleanupWaitsForUnlock, !screenLocked(), let epoch = cleanupPending, let cleanupHandler {
+        if cleanupFailed, !screenLocked(), (cleanupWaitsForUnlock || now() >= cleanupRetryAt), let epoch = cleanupPending, let cleanupHandler {
             cleanupWaitsForUnlock = false; cleanupFailed = false
             deferred.append { cleanupHandler(epoch) }
         }
@@ -448,7 +471,7 @@ final class PairingSession {
                 "window_generation": context.binding.generation, "geometry_epoch": geometryEpoch,
                 "controls_enabled": controlAllowed(context),
                 "window": active && binding == context.binding ? "shared" : "none",
-                "busy": lease != nil || cleanupPending != nil, "screen_locked": screenLocked()]
+                "busy": lease != nil || cleanupPending != nil, "screen_locked": screenLocked(), "cleanup_failed": cleanupPersistentFailure]
             if let request = agentRequest, request.status == .pending {
                 result["request"] = ["id": request.id, "reason": request.reason, "remaining_sec": request.remaining(now())]
             }
@@ -467,7 +490,8 @@ final class PairingSession {
             if let lease {
                 return lease.owner == context && lease.operation == operation && lease.ttl == ttl ? "ok" : "busy"
             }
-            guard cleanupPending == nil, retiredOperations.count < 256,
+            if cleanupPending != nil { return "busy" }
+            guard retiredOperations.count < 256,
                   !retiredOperations.contains(context.sessionID + ":" + operation),
                   let connection = connections[context.connectionID], let session = sessions[connection.session],
                   let pair = pairs[session.pair] else { return "rejected" }

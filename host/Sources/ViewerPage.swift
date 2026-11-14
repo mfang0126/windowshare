@@ -55,7 +55,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
     el('view').disabled=!wanted&&!lease;
     el('keyboard').disabled=el('send').disabled=!active;
     document.querySelectorAll('[data-key],[data-mod]').forEach(b=>b.disabled=!active);
-    el('state').textContent=lease?(active?'Interact · 可操作':'Interact · 等待匹配画面'):(authority?'View · '+(authority.busy?'控制权占用或清理中':'只读'):'View · 控制未连接');
+    el('state').textContent=lease?(active?'Interact · 可操作':'Interact · 等待匹配画面'):(authority?'View · '+(authority.cleanup_failed?'控制通道恢复失败，请在 Mac 上重启 WindowShare':authority.busy?'控制权占用或清理中':'只读'):'View · 控制未连接');
     el('cursor').hidden=!active||el('mode').value!=='mouse';drawCursor();
   }
   function clear(message){

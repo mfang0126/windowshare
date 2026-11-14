@@ -63,7 +63,7 @@ description: Hand a step that needs a person (login, approval, tricky UI, a quic
 |---|---|
 | `seq` | 递增序号，本 host 进程内唯一 |
 | `kind` | `done`、`cancelled`、`timeout`、`left`、`disconnected`、`share_started`、`interact_granted`、`interact_revoked`、`share_ended` |
-| `request_id` | `done`、`cancelled`、`timeout`、`share_ended`：当前（或刚结束的）请求 id；`left`、`disconnected`：最后一个观看端离开那一刻还在等待的请求 id（不是 N 秒到点时的）。没有时为 `null` |
+| `request_id` | `done`、`cancelled`、`timeout`、`share_ended`：当前（或刚结束的）请求 id；`left`、`disconnected`：最后一个观看端离开那一刻还在等待的请求 id（不是 N 秒到点时的）；`share_started`、`interact_granted`、`interact_revoked`：事件产生时当前请求的 id，即使该请求已结束；没有时为 `null` |
 | `at` | Unix 秒（Mac 时钟） |
 | `reason` | 固定词，见下表 |
 | `hint` | 只有 `disconnected` 有，可选，不可当真 |
@@ -77,7 +77,7 @@ description: Hand a step that needs a person (login, approval, tricky UI, a quic
 | `disconnected` | 没收到离开信号，最后一个观看端的连接消失（心跳 15 秒超时或连接被关）后 N 秒仍没有连回来。关页、切后台、断网、休眠、App 被杀都是这一种，host 分不清 | `connection_lost`；`hint`：`heartbeat_timeout` / `connection_closed` | **不回收** |
 | `share_started` | 捕获启动成功 | `capture_started` | 共享已开始 |
 | `interact_granted` | 授予控制租约 | `lease_acquired` | 可交互 |
-| `interact_revoked` | 控制租约结束 | 固定原因词，包括 `screenLocked` | 回到只看 |
+| `interact_revoked` | 控制租约结束 | `screenLocked` / `expiredOrNotAllowed` / `reconnect` / `rejectedInput` / `release` / `geometryChanged` / `controlNotAllowed` / `cleanupFailed` | 回到只看；`cleanupFailed` 表示清理持续失败，需在 Mac 上重启 WindowShare |
 | `share_ended` | 共享结束（完成、菜单停止、12 小时、窗口关闭、睡眠锁屏、几何失败、换窗口……） | host 内部的结束原因词，如 `done`、`shareLimit`、`revokeWindow`、`geometryUnavailable`、`select` | 已结束 |
 
 有多个观看端时只看最后一个离开的：它发了离开信号记 `left`，否则记 `disconnected`；还有观看端连着就什么都不记；从没连上过的页面关掉也不记。N 默认 45 秒，环境变量 `WINDOWSHARE_LEAVE_SEC`（1–3600）可改，**待 Ming 定**。离开信号是手机页面在自己的控制连接关闭前发的一条 `leave` 消息（「停止观看」另有 HTTP 关闭会话作同一信号，谁先到都算），尽力而为。手机上关标签页通常先进后台：进后台那一刻页面就关了连接（后台不算离开），之后的卸载已发不出信号，所以多半记 `disconnected`；`page_unload` 主要见于前台直接卸载（桌面关标签、页面跳转）。另外，App 被杀、断网时发不出，这时只会有 `disconnected`；刷新页面会在 N 内连回来，不记事件。心跳超时要先等 15 秒才算连接消失，所以断网到 `disconnected` 约 15 + N 秒。

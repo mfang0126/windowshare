@@ -181,7 +181,7 @@ def verify_input_diagnostics(path, source):
     # No AppKit/ApplicationServices import, window lookup, or real CGEvent exists here.
     diagnostic = source.split('    final class Diagnostic {', 1)[1].split('    private let window:', 1)[0]
     mouse = source.split('    private func mouse(', 1)[1].split('    static let keys:', 1)[0]
-    perform = source.split('    func perform(', 1)[1].split('        if type == "scroll"', 1)[0]
+    perform = source.split('    func perform(', 1)[1].split('        if type == "key" || type == "text"', 1)[0]
     cleanup = source.split('    func cleanup()', 1)[1].split('\n}', 1)[0]
     keypath = source.split('        if type == "key" || type == "text" {', 1)[1].split('        if type == "resize"', 1)[0]
     sequence = source.split('    static func keySequence(', 1)[1].split('    static let modifiers:', 1)[0]
@@ -193,11 +193,13 @@ enum CGMouseButton: Hashable { case left, right }
 enum CGEventType { case leftMouseDown, rightMouseDown, leftMouseUp, rightMouseUp, leftMouseDragged, mouseMoved, keyDown, keyUp, flagsChanged }
 enum Field { case mouseEventClickState }
 enum Tap { case cghidEventTap }
+enum ScrollUnits { case pixel }
 typealias CGKeyCode = Int
 final class CGEvent {
     static var posts = 0
     static var creates = 0
     static var failAt = 0
+    static var lockAfterPost = false
     static var posted: [(CGEventType?, CGPoint, CGEventFlags)] = []
     var location = CGPoint.zero
     var type: CGEventType?
@@ -207,9 +209,10 @@ final class CGEvent {
         if Self.creates == Self.failAt { return nil }
         location = mouseCursorPosition; type = mouseType
     }
+    init?(scrollWheelEvent2Source: Int?, units: ScrollUnits, wheelCount: Int, wheel1: Int32, wheel2: Int32, wheel3: Int32) {}
     init?(keyboardEventSource: Int?, virtualKey: Int, keyDown: Bool) { type = keyDown ? .keyDown : .keyUp; flags = keyDown ? [] : .maskCommand }
     func setIntegerValueField(_ field: Field, value: Int64) {}
-    func post(tap: Tap) { Self.posts += 1; Self.posted.append((type, location, flags)) }
+    func post(tap: Tap) { Self.posts += 1; Self.posted.append((type, location, flags)); if Self.lockAfterPost { InputController.locked = true } }
     func keyboardSetUnicodeString(stringLength: Int, unicodeString: UnsafePointer<UInt16>?) {}
 }
 final class InputController {
@@ -225,6 +228,7 @@ final class InputController {
     var focusQueue: [Bool] = []
     func focused() -> Bool { focusQueue.isEmpty ? true : focusQueue.removeFirst() }
     var lastPoint: CGPoint?
+    var savedFrame: CGRect?
     var live = true
     var hits = true
     var hitQueue: [Bool] = []
@@ -324,6 +328,27 @@ do {
     InputController.locked = false
     precondition(input.cleanup() && CGEvent.posts == 1 && input.heldKeys.isEmpty)
     print("PASS locked cleanup defers release until unlock")
+}
+// Lock gates each entry point, and a lock during cleanup preserves unreleased tracking.
+do {
+    let pass: (() -> Bool) -> Bool = { $0() }
+    let input = InputController()
+    InputController.locked = true; CGEvent.posts = 0
+    for object: [String: Any] in [
+        ["t": "click", "x": 0.5, "y": 0.5], ["t": "down", "x": 0.5, "y": 0.5],
+        ["t": "move", "x": 0.5, "y": 0.5], ["t": "scroll", "dx": 0, "dy": 1],
+        ["t": "key", "key": "v", "mods": ["cmd"]], ["t": "text", "text": "a"]
+    ] { precondition(!input.perform(object, gate: pass)) }
+    input.heldButtons[.left] = .zero
+    for type in ["drag", "up"] { precondition(!input.perform(["t": type, "x": 0.5, "y": 0.5], gate: pass)) }
+    precondition(!input.cleanup() && input.heldButtons.count == 1 && CGEvent.posts == 0)
+    InputController.locked = false
+    precondition(input.cleanup() && input.heldButtons.isEmpty && CGEvent.posts == 1)
+    input.heldButtons = [.left: .zero, .right: .zero]; CGEvent.posts = 0; CGEvent.lockAfterPost = true
+    precondition(!input.cleanup() && CGEvent.posts == 1 && input.heldButtons.count == 1, "lock mid cleanup preserves unreleased button")
+    CGEvent.lockAfterPost = false; InputController.locked = false
+    precondition(input.cleanup() && input.heldButtons.isEmpty && CGEvent.posts == 2)
+    print("PASS all locked input entries post nothing; cleanup retries tracked release")
 }
 // A chord ends with no flags and nothing held; refused part-way (focus moved after the modifier downs), it releases
 // what it pressed at once, last event without flags, before any cleanup.
