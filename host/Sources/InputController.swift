@@ -7,9 +7,12 @@ private func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePo
 
 /// All calls are main-queue confined. No native mutation is allowed without a submission gate.
 final class InputController {
+    static func lockedSession(_ session: [String: Any]?) -> Bool {
+        guard let session else { return true }
+        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
+    }
     static func screenLocked() -> Bool {
-        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
-        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? true
+        lockedSession(CGSessionCopyCurrentDictionary() as? [String: Any])
     }
     typealias Gate = (() -> Bool) -> Bool
     final class Diagnostic {
@@ -327,7 +330,8 @@ final class InputController {
     /// Release-only, never gated: a modifier goes up as a flagsChanged with no flags (a plain key-up keeps the flag).
     private func releaseKey(_ code: CGKeyCode) -> Bool {
         guard !Self.screenLocked(), let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return false }
-        if Self.modifierKeys.contains(where: { $0.code == code }) { event.type = .flagsChanged; event.flags = [] }
+        event.flags = []
+        if Self.modifierKeys.contains(where: { $0.code == code }) { event.type = .flagsChanged }
         guard !Self.screenLocked() else { return false }
         event.post(tap: .cghidEventTap)
         heldKeys.remove(code)

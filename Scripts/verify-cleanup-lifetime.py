@@ -317,7 +317,7 @@ do {
     precondition(input.cleanup() && input.heldKeys.isEmpty)
     // The fake key-up starts with Command set, so a modifier released as a plain key-up would keep it.
     precondition(CGEvent.posted.filter { $0.0 != .keyUp }.allSatisfy { $0.2.isEmpty } && CGEvent.posted.filter { $0.0 == .flagsChanged }.count == 1)
-    precondition(CGEvent.posted.count == 2)
+    precondition(CGEvent.posted.count == 2 && CGEvent.posted.last!.2.isEmpty)
     print("PASS cleanup releases modifiers and ends with no flags")
 }
 // Locking cannot post a release; held state survives until unlock.
@@ -333,6 +333,17 @@ do {
 do {
     let pass: (() -> Bool) -> Bool = { $0() }
     let input = InputController()
+    InputController.locked = false; CGEvent.posts = 0
+    input.armed = true
+    for object: [String: Any] in [
+        ["t": "click", "x": 0.5, "y": 0.5], ["t": "scroll", "dx": 0, "dy": 1],
+        ["t": "key", "key": "v", "mods": ["cmd"]], ["t": "text", "text": "a"]
+    ] { let before = CGEvent.posts; precondition(input.perform(object, gate: pass) && CGEvent.posts > before) }
+    for type in ["down", "move", "drag", "up"] {
+        let before = CGEvent.posts
+        precondition(input.perform(["t": type, "x": 0.5, "y": 0.5], gate: pass) && CGEvent.posts > before, "unlocked \(type) posts")
+    }
+    precondition(input.heldKeys.isEmpty && input.heldButtons.isEmpty)
     InputController.locked = true; CGEvent.posts = 0
     for object: [String: Any] in [
         ["t": "click", "x": 0.5, "y": 0.5], ["t": "down", "x": 0.5, "y": 0.5],
@@ -341,7 +352,7 @@ do {
     ] { precondition(!input.perform(object, gate: pass)) }
     input.heldButtons[.left] = .zero
     for type in ["drag", "up"] { precondition(!input.perform(["t": type, "x": 0.5, "y": 0.5], gate: pass)) }
-    precondition(!input.cleanup() && input.heldButtons.count == 1 && CGEvent.posts == 0)
+    precondition(input.heldKeys.isEmpty && !input.cleanup() && input.heldButtons.count == 1 && CGEvent.posts == 0)
     InputController.locked = false
     precondition(input.cleanup() && input.heldButtons.isEmpty && CGEvent.posts == 1)
     input.heldButtons = [.left: .zero, .right: .zero]; CGEvent.posts = 0; CGEvent.lockAfterPost = true

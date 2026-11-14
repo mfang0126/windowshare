@@ -89,6 +89,14 @@ final class ControlServer {
         resultLock.lock(); let success = started; resultLock.unlock()
         guard success else { next.cancel(); throw NSError(domain: "WindowShare.Control", code: 3) }
         installCleanup()
+        identity.observeState { [weak self] in
+            self?.queue.async { [weak self] in
+                guard let self else { return }
+                for client in Array(self.clients.values) {
+                    if let context = client.context, let state = self.identity.state(context) { self.reply(state, client) }
+                }
+            }
+        }
         listener = next
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1, repeating: 1)
@@ -198,7 +206,11 @@ final class ControlServer {
     }
     private func handle(_ object: [String: Any], type: String, _ client: Client) {
         func exact(_ keys: Set<String>) -> Bool { Set(object.keys) == keys }
-        func status(_ result: String) { reply(["t": result == "ok" ? "ack" : "error", "status": result], client) }
+        func status(_ result: String) {
+            var response: [String: Any] = ["t": result == "ok" ? "ack" : "error", "status": result]
+            if result == "screenLocked" { response["message"] = "Mac 已锁屏，请先解锁" }
+            reply(response, client)
+        }
         guard let context = client.context else {
             guard exact(["t", "ticket", "resource"]), type == "auth", let ticket = object["ticket"] as? String,
                   let resource = object["resource"] as? String,
@@ -273,9 +285,10 @@ final class ControlServer {
             let diagnostic = InputController.Diagnostic()
             if InputController.screenLocked() {
                 identity.cancelInput(context, id: id, epoch: epoch)
-                queue.async { client.busy = false; self.reply(["t": "error", "status": "screenLocked", "input_seq": sequence], client) }
+                queue.async { client.busy = false; self.reply(["t": "error", "status": "screenLocked", "message": "Mac 已锁屏，请先解锁", "input_seq": sequence], client) }
                 return
             }
+            let leaseWasValid = identity.hasLease(context, id: id, epoch: epoch)
             var accepted = false
             defer {
                 fputs("[input] seq=\(sequence) stage=\(diagnostic.stage.rawValue) accepted=\(accepted) posted_down=\(diagnostic.postedDown) posted_up=\(diagnostic.postedUp)\n", stderr)
@@ -299,7 +312,11 @@ final class ControlServer {
             queue.async {
                 client.busy = false
                 guard self.clients[ObjectIdentifier(client.connection)] != nil else { return }
-                self.reply(["t": ok ? "ack" : "error", "status": ok ? "ok" : (InputController.screenLocked() ? "screenLocked" : "rejected"), "input_seq": sequence], client)
+                let status = ok ? "ok" : (InputController.screenLocked() ? "screenLocked" : (!leaseWasValid ? "leaseRevoked" : "rejected"))
+                var response: [String: Any] = ["t": ok ? "ack" : "error", "status": status, "input_seq": sequence]
+                if status == "screenLocked" { response["message"] = "Mac 已锁屏，请先解锁" }
+                if status == "leaseRevoked" { response["message"] = "租约已撤销" }
+                self.reply(response, client)
                 if let state = self.identity.state(context) { self.reply(state, client) }
             }
         }

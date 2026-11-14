@@ -112,6 +112,13 @@ final class PairingSession {
     private var sessions: [String: Session] = [:]
     private var expiryTimer: DispatchSourceTimer?
     private var unlockObserver: NSObjectProtocol?
+    private var lockObserver: NSObjectProtocol?
+    private var stateObserver: (() -> Void)?
+    static let cleanupRetryCap: TimeInterval = 30
+    static func cleanupRetryDelay(failures: Int) -> TimeInterval {
+        min(cleanupRetryCap, pow(2, Double(min(5, max(0, failures - 1)))))
+    }
+    func observeState(_ observer: (() -> Void)?) { locked { stateObserver = observer } }
     private var agentToken: String?
     private var agentEntry = ""
     private var agentEntries: [String] = []
@@ -154,6 +161,9 @@ final class PairingSession {
         timer.setEventHandler { [weak self] in self?.locked { self?.expire() } }
         timer.resume()
         expiryTimer = timer
+        lockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: nil
+        ) { [weak self] _ in self?.screenDidLock() }
         unlockObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: nil
         ) { [weak self] _ in self?.locked { self?.cleanupRetryAt = 0 } }
@@ -161,7 +171,10 @@ final class PairingSession {
     deinit {
         expiryTimer?.cancel()
         if let unlockObserver { DistributedNotificationCenter.default().removeObserver(unlockObserver) }
+        if let lockObserver { DistributedNotificationCenter.default().removeObserver(lockObserver) }
     }
+
+    func screenDidLock() { locked { revokeLease("screenLocked") } }
 
     private func locked<T>(_ action: () -> T) -> T {
         lock.lock()
@@ -327,10 +340,11 @@ final class PairingSession {
                     if cleanupFailures >= 3 && !cleanupPersistentFailure {
                         cleanupPersistentFailure = true
                         deferred.append { fputs("[session] cleanup failed repeatedly; restart WindowShare if recovery does not complete\n", stderr) }
-                        emit("interact_revoked", "cleanupFailed")
+                        emit("cleanup_failed", "cleanupFailed")
+                        if let stateObserver { deferred.append(stateObserver) }
                     }
                 }
-                cleanupRetryAt = now() + min(30, pow(2, Double(min(5, max(0, cleanupFailures - 1)))))
+                cleanupRetryAt = now() + Self.cleanupRetryDelay(failures: cleanupFailures)
                 return
             }
             cleanupPending = nil; cleanupPersistentFailure = false; cleanupFailures = 0
@@ -502,6 +516,9 @@ final class PairingSession {
             if let interactObserver { deferred.append { interactObserver(true) } }
             return "ok"
         }
+    }
+    func hasLease(_ context: Context, id: String, epoch: Int) -> Bool {
+        locked { lease?.owner == context && lease?.id == id && lease?.epoch == epoch }
     }
     func cancelInput(_ context: Context, id: String, epoch: Int) {
         locked { if let lease, lease.owner == context, lease.id == id, lease.epoch == epoch { if screenLocked() { revokeLease("screenLocked") } else { revokeLease("rejectedInput") } } }

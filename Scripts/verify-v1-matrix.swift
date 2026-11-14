@@ -1,4 +1,9 @@
 import Foundation
+precondition(InputController.lockedSession(nil))
+precondition(!InputController.lockedSession([:]))
+precondition(!InputController.lockedSession(["CGSSessionScreenIsLocked": false]))
+precondition(InputController.lockedSession(["CGSSessionScreenIsLocked": true]))
+precondition(!InputController.lockedSession(["CGSSessionScreenIsLocked": "invalid"]))
 var clock = 100.0
 let token = String(repeating: "ab", count: 32)
 let secretReason = "SECRET-REASON-登录"
@@ -81,6 +86,8 @@ precondition(first.count == 1 && first[0]["kind"] as? String == "share_started")
 _ = drain()
 var cleanupEpochs: [Int] = []
 let cleanupSignal = DispatchSemaphore(value: 0)
+var statePushes = 0
+identity.observeState { statePushes += 1 }
 identity.installCleanup { cleanupEpochs.append($0); cleanupSignal.signal() }
 let control = viewer()
 locked = true
@@ -102,7 +109,8 @@ _ = identity.state(control.context)
 precondition(cleanupEpochs.count == 2 && cleanupEpochs[0] == cleanupEpochs[1], "retry cleanup after unlock")
 identity.finishCleanup(epoch: cleanupEpochs[1], success: false)
 clock += 1
-_ = identity.state(control.context)
+precondition(cleanupSignal.wait(timeout: .now() + 3) == .success) // consume prior callback signal
+precondition(cleanupSignal.wait(timeout: .now() + 3) == .success, "timer retries without request")
 precondition(cleanupEpochs.count == 3, "retry non-lock cleanup failure")
 identity.finishCleanup(epoch: cleanupEpochs[2], success: false)
 clock += 2
@@ -110,13 +118,40 @@ _ = identity.state(control.context)
 precondition(cleanupEpochs.count == 4, "second non-lock retry")
 identity.finishCleanup(epoch: cleanupEpochs[3], success: false)
 let failedState = identity.state(control.context)!
-precondition(failedState["cleanup_failed"] as? Bool == true, "persistent failure visible")
+precondition(failedState["cleanup_failed"] as? Bool == true && statePushes == 1, "persistent failure pushed")
 precondition(identity.acquire(control.context, operation: UUID().uuidString, ttl: 300) == "busy")
-precondition(kinds(drain()) == ["interact_revoked:cleanupFailed"], "failure event once")
+precondition(kinds(drain()) == ["cleanup_failed:cleanupFailed"], "failure event once")
 clock += 4
 _ = identity.state(control.context)
 precondition(cleanupEpochs.count == 5)
-identity.finishCleanup(epoch: cleanupEpochs[4], success: true)
+identity.finishCleanup(epoch: cleanupEpochs[4], success: false)
+precondition(PairingSession.cleanupRetryCap == 30)
+precondition(PairingSession.cleanupRetryDelay(failures: 1) == 1 && PairingSession.cleanupRetryDelay(failures: 4) == 8)
+precondition(PairingSession.cleanupRetryDelay(failures: 6) == 30 && PairingSession.cleanupRetryDelay(failures: 100) == 30)
+if let nonce = identity.heartbeat(control.context) { precondition(identity.pong(control.context, nonce: nonce)) }
+clock += 8
+_ = identity.state(control.context)
+precondition(cleanupEpochs.count == 6)
+identity.finishCleanup(epoch: cleanupEpochs.last!, success: true)
+let recovered = identity.state(control.context)!
+precondition(recovered["busy"] as? Bool == false && recovered["cleanup_failed"] as? Bool == false)
+precondition(identity.acquire(control.context, operation: UUID().uuidString, ttl: 300) == "ok", "acquire after cleanup")
+let beforeNotification = cleanupEpochs.count
+identity.screenDidLock() // callback path, with injected screen query still false: notification itself revokes
+precondition(cleanupEpochs.count == beforeNotification + 1 && identity.state(control.context)!["mode"] as? String == "View", "lock notification revokes immediately")
+let restarted = PairingSession(now: { clock }, screenLocked: { false })
+restarted.installCleanup { _ in }
+let freshBinding = restarted.selectWindow()
+precondition(restarted.activate(freshBinding))
+var freshReply: PairingSession.Reply!
+restarted.respond(method: "POST", path: "/session", fields: ["window_id": freshBinding.windowID], cookies: [:], authorization: nil, loopback: false) { freshReply = $0 }
+precondition(freshReply.status == 200, "fresh session after restart")
+let freshCookieParts = freshReply.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
+let freshCookies = [freshCookieParts[0]: freshCookieParts[1]]
+restarted.respond(method: "POST", path: "/w/\(freshBinding.windowID)/connect", fields: [:], cookies: freshCookies, authorization: nil, loopback: false) { freshReply = $0 }
+let freshTicket = json(freshReply)
+let freshContext = restarted.authenticate(ticket: freshTicket["ticket"] as! String, resource: freshTicket["resource"] as! String, cancel: {})!
+precondition(restarted.acquire(freshContext, operation: UUID().uuidString, ttl: 300) == "ok", "acquire after restart")
 var calls = 0
 precondition(InputController.releaseTracked(buttons: [:], keys: [], releaseButton: { _, _ in calls += 1; return true }, releaseKey: { _ in calls += 1; return true }))
 precondition(calls == 0, "no tracked downs means no post")
