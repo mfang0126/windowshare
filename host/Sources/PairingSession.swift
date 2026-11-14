@@ -435,7 +435,9 @@ final class PairingSession {
     /// Any failure revokes frames and input at once (fail-closed, no retry); the one log line names the check and
     /// the caller that triggered the revocation (F-4).
     func observeGeometry(_ reading: Result<[Double], GeometryFailure>, source: GeometrySource, binding expected: Binding) -> Int? {
-        locked {
+        var revoked: GeometryFailure?
+        defer { if let revoked { fputs("[geometry] unavailable source=\(source.rawValue) \(revoked)\n", stderr) } } // after unlock
+        return locked {
             guard active, binding == expected else { return nil }
             var failure: GeometryFailure
             switch reading {
@@ -443,7 +445,7 @@ final class PairingSession {
             case .success(let v): failure = GeometryFailure(check: .nonFinite); failure.values = v.count
             }
             guard case .success(let value) = reading, value.count == 5, value.allSatisfy({ $0.isFinite }) else {
-                fputs("[geometry] unavailable source=\(source.rawValue) \(failure)\n", stderr)
+                revoked = failure
                 clearWindow("geometryUnavailable"); return nil
             }
             if geometry != value {

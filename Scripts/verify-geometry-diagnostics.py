@@ -27,6 +27,13 @@ if 'identity.observeGeometry(reading, source: .capture, binding: binding)' not i
 for name, text in [('ControlServer', control), ('CaptureController', capture)]:
     if 'observeGeometry(input.geometry()' in text or 'observeGeometry(live,' in text:
         failures.append(f'{name} still observes geometry without a source')
+# Tree-wide: the source-less wrapper (kept for tests) must have no production caller, so no call logs a wrong source.
+import re
+calls = [(f.name, l.strip()) for f in sorted(src.glob('*.swift')) for l in f.read_text().splitlines()
+         if 'observeGeometry(' in l and 'func observeGeometry(' not in l
+         and l.strip() != 'observeGeometry(.success(value), source: .capture, binding: expected)']  # the wrapper's own body
+if len(calls) != 3 or any('source: .' not in l for _, l in calls):
+    failures.append(f'production observeGeometry calls must be exactly the 3 sourced ones, got {calls}')
 
 HARNESS = r'''
 import Foundation
@@ -81,6 +88,14 @@ for (name, p) in cases {
         say("RESULT revoked=\(revokedNow) revived=\(revived)")
     }
 }
+// A capture frame with no geometry reader (should not happen) is still named and revokes.
+do {
+    let identity = PairingSession(now: { 100 })
+    let binding = identity.selectWindow(); precondition(identity.activate(binding))
+    say("CASE no_reader capture")
+    let reading: Result<[Double], PairingSession.GeometryFailure> = .failure(PairingSession.GeometryFailure(check: .noReader))
+    say("RESULT revoked=\(identity.observeGeometry(reading, source: .capture, binding: binding) == nil && !identity.isCurrent(binding)) revived=false")
+}
 // A finite-count violation that reaches the session as a value is still named.
 let identity = PairingSession(now: { 100 })
 let binding = identity.selectWindow(); precondition(identity.activate(binding))
@@ -105,6 +120,7 @@ EXPECT = {
     'display_mode': 'check=display_mode launch_ok=true windows=1 id_ok=true pid_ok=true bounds_ok=true display_query_ok=true displays=1 mode_ok=false mode_width_ok=false values=-1',
     'mode_width': 'check=mode_width' + COMMON + ' mode_width_ok=false values=-1',
     'non_finite': 'check=non_finite' + COMMON + ' mode_width_ok=true values=-1',
+    'no_reader': 'check=no_reader launch_ok=false windows=-1 id_ok=false pid_ok=false bounds_ok=false display_query_ok=false displays=-1 mode_ok=false mode_width_ok=false values=-1',
     'short_value': 'check=non_finite launch_ok=false windows=-1 id_ok=false pid_ok=false bounds_ok=false display_query_ok=false displays=-1 mode_ok=false mode_width_ok=false values=3',
 }
 
@@ -138,10 +154,11 @@ for (name, source), lines in cases.items():
     if diag != [want]: failures.append(f'{name} {source}: want {want!r}, got {diag}')
     revoke = [i for i, l in enumerate(lines) if 'geometryUnavailable' in l]
     if [lines[i] for i in revoke] != ['[session] window revoked reason=geometryUnavailable'] or \
-            not diag or lines.index(diag[0]) > revoke[0]:
-        failures.append(f'{name} {source}: want the diagnostic then one geometryUnavailable revoke: {lines}')
+            not diag or lines.index(diag[0]) < revoke[0]:
+        failures.append(f'{name} {source}: want one geometryUnavailable revoke then its diagnostic: {lines}')
     if 'RESULT revoked=true revived=false' not in lines: failures.append(f'{name} {source}: not revoked at once or revived: {lines}')
-expected_cases = {('ok', 'capture'), ('short_value', 'capture')} | {(n, s) for n in EXPECT if n != 'short_value' for s in ['capture', 'input', 'commit_gate']}
+single = {'short_value', 'no_reader'}
+expected_cases = {('ok', 'capture')} | {(n, 'capture') for n in single} | {(n, s) for n in EXPECT if n not in single for s in ['capture', 'input', 'commit_gate']}
 if log and set(cases) != expected_cases: failures.append(f'cases ran {len(cases)}, want {len(expected_cases)}')
 geometry_lines = '\n'.join(l for l in log.splitlines() if l.startswith('[geometry]'))
 for leak in ['WS-SECRET', 'http', 'example.invalid', 'token', 'tok-123', '1234', '678', '777', '555', '3024', '1512']:
@@ -149,5 +166,5 @@ for leak in ['WS-SECRET', 'http', 'example.invalid', 'token', 'tok-123', '1234',
 
 for f in failures: print('FAIL', f)
 if failures: sys.exit(1)
-print(f'PASS geometry diagnostics: {len(cases) - 1} failure cases (14 variants of the 8 checks x capture/input/commit_gate, plus a short value) each log one'
+print(f'PASS geometry diagnostics: {len(cases) - 1} failure cases (14 variants of the 8 checks x capture/input/commit_gate, plus no_reader and a short value) each log one'
       ' fixed check name, caller, booleans and counts, revoke at once and stay revoked; no title/link/token/coordinate')
