@@ -4,6 +4,8 @@
 
 **当前：PR #5 第六轮，先完善功能。** 依据 [2026-11-15 产品要求](docs/product/share-page-ux-20261115.md)，先整理文档，再实现零控件分享、手机触控与输入、地址选择、Agent 离屏窗口路径及后台资源暂停，修复长文本和滚动拒绝。帧率暂不调整或测试；只提交 PR 分支，不合并或发布。
 
+2026-11-15 第六轮续做第 0 块：长文本按 128 字符/1024 字节分段并等待逐段确认；零副作用拒绝保留租约，部分执行或锁屏仍撤权。输入录制、Viewer 分段/恢复、真实 loopback WebSocket 锁屏回归及 Swift build 通过；无真实 HID 或真机验收。
+
 历史：v1.0.0 已发布（M1 + M2 + M4 完成；M2-b、M2-c 不做）。
 
 2026-11-15 第六轮第 2 项：CLI `list --include-offscreen --json` 返回离屏窗口及 `on_screen`，`--window-id` 可选离屏目标；菜单仍只列屏上窗口。无激活或窗口切换。`verify-offscreen-selection.swift` 与 Swift build 通过，Ego 离屏真实出帧未测。

@@ -308,12 +308,14 @@ final class ControlServer {
                                        geometry: geometry, execution: execution, effect: effect)
             }
             accepted = ok
-            if !ok { identity.cancelInput(context, id: id, epoch: epoch) }
+            let revoke = !ok && Self.mustRevokeRejectedInput(postedEffects: diagnostic.postedEffects, locked: InputController.screenLocked())
+            if revoke { identity.cancelInput(context, id: id, epoch: epoch) }
             queue.async {
                 client.busy = false
                 guard self.clients[ObjectIdentifier(client.connection)] != nil else { return }
                 let status = ok ? "ok" : (InputController.screenLocked() ? "screenLocked" : (!leaseWasValid ? "leaseRevoked" : "rejected"))
                 var response: [String: Any] = ["t": ok ? "ack" : "error", "status": status, "input_seq": sequence]
+                if !ok { response["retryable"] = !revoke && self.identity.hasLease(context, id: id, epoch: epoch) }
                 if status == "screenLocked" { response["message"] = "Mac 已锁屏，请先解锁" }
                 if status == "leaseRevoked" { response["message"] = "租约已撤销" }
                 self.reply(response, client)
@@ -321,6 +323,9 @@ final class ControlServer {
             }
         }
     }
+    /// Rejecting an untouched action does not invalidate a safe lease. Partial execution can leave held state,
+    /// so it must revoke and run cleanup; lock/geometry/authority changes retain their independent revocation.
+    static func mustRevokeRejectedInput(postedEffects: Int, locked: Bool) -> Bool { locked || postedEffects > 0 }
     private func reply(_ object: [String: Any], _ client: Client) {
         guard clients[ObjectIdentifier(client.connection)] != nil, client.sends < 8,
               JSONSerialization.isValidJSONObject(object),

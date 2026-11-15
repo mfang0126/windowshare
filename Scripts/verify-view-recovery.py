@@ -8,7 +8,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 js = (root / 'host/Sources/ViewerPage.swift').read_text().split('<script>')[1].split('</script>')[0]
 js = js.replace('  openView().catch(e=>recover(e.message));', '''
-  globalThis.test={recover,openView,clear,setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
+  globalThis.test={recover,openView,clear,textChunks,queueText,prime(){displayedGeometry=authority.geometry_epoch;},setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
 ''')
 harness = r'''
 const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
@@ -43,6 +43,20 @@ vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);c
  ws.onmessage({data:JSON.stringify(st)});el('interact').onclick();assert.match(el('detail').textContent,/正在申请控制权/);
  ws.onmessage({data:JSON.stringify({...st,mode:'Interact',lease_id:'L',lease_epoch:1})});
  assert.doesNotMatch(el('detail').textContent,/正在申请控制权/,'lease granted but status still says requesting');assert.match(el('detail').textContent,/已获得控制权/);
+ // Long mixed text is split within wire limits and only advances after the matching acknowledgement.
+ t.prime();const mixed='中文Ab9🙂'.repeat(100),chunks=Array.from(t.textChunks(mixed));
+ assert.equal(chunks.join(''),mixed);assert(chunks.every(x=>[...x].length<=128&&Buffer.byteLength(x)<=1024));
+ el('text').value=mixed;const start=sent.length;assert(t.queueText(mixed));
+ let typed=sent.slice(start).filter(x=>x.t==='text');assert.equal(typed.length,1);
+ ws.onmessage({data:JSON.stringify({t:'ack',input_seq:999})});assert.equal(sent.slice(start).filter(x=>x.t==='text').length,1);
+ for(let i=0;i<chunks.length;i++){
+   typed=sent.slice(start).filter(x=>x.t==='text');assert.equal(typed.length,i+1);assert.equal(typed[i].text,chunks[i]);
+   ws.onmessage({data:JSON.stringify({t:'ack',input_seq:typed[i].input_seq})});
+ }
+ assert.equal(el('text').value,'');assert.equal(sent.slice(start).filter(x=>x.t==='text').map(x=>x.text).join(''),mixed);
+ assert(t.queueText(mixed));const beforeReject=sent.filter(x=>x.t==='text').length;
+ ws.onmessage({data:JSON.stringify({t:'error',retryable:true})});
+ assert.equal(sent.filter(x=>x.t==='text').length,beforeReject);assert(t.values().lease);assert.equal(t.values().pending,null);
  // Host exit closes the socket with 1001: show 「共享已结束」 and stop retrying; any other close still recovers.
  timers.clear();ws.onclose({code:1001});assert.match(el('state').textContent,/共享已结束/,'host exit left: '+el('state').textContent);assert.doesNotMatch(el('detail').textContent,/控制权/);
  assert.equal(timers.size,0);events.online();assert.equal(timers.size,0);

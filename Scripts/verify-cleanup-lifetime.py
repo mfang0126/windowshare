@@ -24,6 +24,7 @@ final class InputController {
             case effectPosted = "effect_posted"
         }
         var stage: Stage = .preTarget
+        var postedEffects = 0
         var postedDown = 0
         var postedUp = 0
     }

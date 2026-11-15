@@ -20,10 +20,11 @@ final class InputController {
             case preTarget = "pre_target", preGeometry = "pre_geometry"
             case liveTarget = "perform_live_target", eventCreate = "event_create"
             case gateDemo = "gate_demo", gateGeometry = "gate_geometry"
-            case submitAuthority = "submit_authority", hit, heldButton = "held_button"
+            case submitAuthority = "submit_authority", hit, focus, locked, heldButton = "held_button"
             case effectPosted = "effect_posted"
         }
         var stage: Stage = .preTarget
+        var postedEffects = 0
         var postedDown = 0
         var postedUp = 0
     }
@@ -253,6 +254,7 @@ final class InputController {
             }
             guard !self.isLocked() else { return false }
             self.poster(event)
+            diagnostic?.postedEffects += 1
             diagnostic?.stage = .effectPosted
             if type == .leftMouseDown || type == .rightMouseDown { diagnostic?.postedDown += 1 }
             if type == .leftMouseUp || type == .rightMouseUp { diagnostic?.postedUp += 1 }
@@ -319,7 +321,14 @@ final class InputController {
                   let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
                                       wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0) else { return false }
             event.location = point
-            return gate { guard self.hit(point), !self.isLocked() else { return false }; self.poster(event); return true }
+            return gate {
+                diagnostic?.stage = .hit
+                guard self.hit(point) else { return false }
+                diagnostic?.stage = .locked
+                guard !self.isLocked() else { return false }
+                self.poster(event); diagnostic?.postedEffects += 1; diagnostic?.stage = .effectPosted
+                return true
+            }
         }
         if type == "key" || type == "text" {
             let code = type == "key" ? Self.keys[object["key"] as! String]! : 0
@@ -341,8 +350,12 @@ final class InputController {
                     }
                     // Residual risk: focus can change between this check and the post; at most one event lands elsewhere.
                     guard gate({
-                        guard self.focused(), !self.isLocked() else { return false }
+                        diagnostic?.stage = .focus
+                        guard self.focused() else { return false }
+                        diagnostic?.stage = .locked
+                        guard !self.isLocked() else { return false }
                         self.poster(event)
+                        diagnostic?.postedEffects += 1; diagnostic?.stage = .effectPosted
                         if step.down { self.heldKeys.insert(step.code); pressed.append(step.code) } else { self.heldKeys.remove(step.code) }
                         return true
                     }) else { return abandon() }

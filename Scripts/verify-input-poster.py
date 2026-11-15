@@ -151,6 +151,29 @@ interrupted.testTrackButton(.left, point: .zero); interrupted.testTrackButton(.r
 precondition(!interrupted.cleanup() && releaseCount == 1)
 lockedDuringCleanup = false
 precondition(interrupted.cleanup() && releaseCount == 2)
+// Long mixed text exercises the real native executor with only a recording poster.
+let mixed = String(repeating: "中文Ab9🙂", count: 80)
+let typing = InputController(window: window, poster: { events.append(($0.type, $0.flags, $0.location)) }, isLocked: { false })
+typing.testFrame = CGRect(x: 0, y: 0, width: 100, height: 100)
+typing.testFocus = Array(repeating: true, count: mixed.count * 2)
+let typed = InputController.Diagnostic(), startText = events.count
+var gates = 0
+precondition(typing.perform(["t":"text", "text":mixed], diagnostic:typed, gate:{ effect in gates += 1; return effect() }))
+precondition(typed.postedEffects == mixed.count * 2 && gates == mixed.count * 2 && events.count - startText == mixed.count * 2)
+precondition(typed.stage == .effectPosted)
+let focusDenied = InputController.Diagnostic()
+typing.testFocus = [false]
+precondition(!typing.perform(["t":"text", "text":"中"], diagnostic:focusDenied, gate:pass))
+precondition(focusDenied.stage == .focus && focusDenied.postedEffects == 0)
+let scroll = InputController.Diagnostic()
+typing.testHits = [true]
+precondition(typing.perform(["t":"scroll", "dx":0, "dy":120], diagnostic:scroll, gate:pass))
+precondition(scroll.postedEffects == 1 && scroll.stage == .effectPosted && events.last!.0 == .scrollWheel)
+let scrollDenied = InputController.Diagnostic()
+typing.testHits = [false]
+precondition(!typing.perform(["t":"scroll", "dx":0, "dy":120], diagnostic:scrollDenied, gate:pass))
+precondition(scrollDenied.postedEffects == 0 && scrollDenied.stage == .hit)
+print("PASS long Chinese/English/emoji text and scrolling; focus/hit rejection has no effects")
 precondition(InputController.testNativePostAttempts == 0, "unexpected native post attempts")
 print("PASS production input: click, chord, lock, deferred cleanup, release targeting and partial failures")
 ''')

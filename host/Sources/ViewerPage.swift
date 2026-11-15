@@ -47,7 +47,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   const note=message=>{el('detail').textContent=message;};
   function raw(message){if(socket?.readyState!==WebSocket.OPEN)return false;socket.send(JSON.stringify(message));return true;}
   function resetGesture(){clearTimeout(longTimer);longTimer=null;const old=pointer;pointer=null;if(old&&stage.hasPointerCapture(old.id))stage.releasePointerCapture(old.id);dragging=false;latest=null;finalUp=null;}
-  function resetInput(){resetGesture();pending=null;mods.clear();composing=false;document.querySelectorAll('[data-mod]').forEach(b=>b.setAttribute('aria-pressed','false'));}
+  function resetInput(){resetGesture();pending=null;textQueue=[];sentText=null;mods.clear();composing=false;document.querySelectorAll('[data-mod]').forEach(b=>b.setAttribute('aria-pressed','false'));}
   function ready(){return !!(controlsEnabled&&wanted&&lease&&displayedGeometry===authority?.geometry_epoch&&socket?.readyState===WebSocket.OPEN);}
   function render(){
     const active=ready();stage.classList.toggle('active',active);
@@ -176,8 +176,9 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
         if(m.t==='heartbeat'){if(!document.hidden)raw({t:'pong',nonce:m.nonce});return;}
         if(m.t==='state'){state(m);if(!authenticated&&authority){authenticated=true;note('正在观看；需要操作时开启 Interact。');}return;}
         if(m.t==='ack'||m.t==='error'){
+          if(m.t==='error'&&m.retryable===true){pending=null;sentText=null;textQueue=[];latest=finalUp=null;note('这次操作未执行；控制权保留，请确认目标窗口后再操作。');render();return;}
           if(m.t==='error'){leave(m.status==='screenLocked'?'Mac 已锁屏，请先解锁':'控制已停止；操作可能部分执行，请查看窗口结果，不要重复提交。');return;}
-          if(m.input_seq!==undefined&&pending===m.input_seq){if(sentText!==null&&el('text').value===sentText)el('text').value='';sentText=null;pending=null;const next=finalUp||latest;finalUp=latest=null;if(next)input(next);render();if(tuning.input&&!snapshotBusy&&wanted&&lease){clearTimeout(snapshotTimer);snapshot();}}
+          if(m.input_seq!==undefined&&pending===m.input_seq){if(sentText!==null&&el('text').value.startsWith(sentText))el('text').value=el('text').value.slice(sentText.length);sentText=null;pending=null;const next=finalUp||latest;finalUp=latest=null;if(next)input(next);else pumpText();render();if(tuning.input&&!snapshotBusy&&wanted&&lease){clearTimeout(snapshotTimer);snapshot();}}
           raw({t:'state'});
         }
       };
@@ -194,7 +195,15 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
     }catch(e){if(version===epoch){if(socket?.readyState===1)timer=setTimeout(()=>{if(version===epoch)recover(e.message);},1000);else recover(e.message);}}
   }
   function watch(){clear('View · 连接中');const version=epoch;el('close').disabled=false;el('retry').disabled=false;stream();monitor(version);connect(version);}
-  let sentText=null;
+  let sentText=null, textQueue=[];
+  function textChunks(text){
+    const chunks=[];let chunk='',count=0,bytes=0;
+    for(const char of text){const n=new TextEncoder().encode(char).length;if(count>=128||bytes+n>1024){chunks.push(chunk);chunk='';count=bytes=0;}chunk+=char;count++;bytes+=n;}
+    if(chunk)chunks.push(chunk);return chunks;
+  }
+  function pumpText(){if(!pending&&textQueue.length&&ready()){const text=textQueue[0];if(input({t:'text',text}))textQueue.shift();}}
+  function queueText(text){if(!text||!ready())return false;textQueue.push(...textChunks(text));pumpText();return true;}
+
   function input(payload){
     if(!ready()||!['click','move','down','drag','up','scroll','text','key'].includes(payload.t))return false;
     if(pending){
@@ -253,7 +262,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   el('view').onclick=()=>leave();
   el('keyboard').onclick=()=>{el('keys').hidden=!el('keys').hidden;el('keyboard').setAttribute('aria-expanded',String(!el('keys').hidden));if(!el('keys').hidden)el('text').focus();};
   el('text').addEventListener('compositionstart',()=>composing=true);el('text').addEventListener('compositionend',()=>composing=false);
-  el('send').onclick=()=>{const text=el('text').value;if(composing||!text)return;if([...text].length>256){note('文本过长，请分段发送（每段最多 256 字）。');return;}input({t:'text',text});};
+  el('send').onclick=()=>{const text=el('text').value;if(composing||!text)return;if(pending||textQueue.length){note('正在发送；请等待本次输入完成。');return;}queueText(text);};
   el('text').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)&&!e.isComposing){e.preventDefault();el('send').click();}});
   document.querySelectorAll('[data-key]').forEach(b=>b.onclick=()=>input({t:'key',key:b.dataset.key,mods:[...mods]}));
   document.querySelectorAll('[data-mod]').forEach(b=>b.onclick=()=>{if(!ready())return;const m=b.dataset.mod;if(mods.has(m))mods.delete(m);else mods.add(m);b.setAttribute('aria-pressed',String(mods.has(m)));});

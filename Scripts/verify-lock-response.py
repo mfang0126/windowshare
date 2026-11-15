@@ -21,6 +21,9 @@ with tempfile.TemporaryDirectory(prefix='windowshare-lock-') as d:
     static let keys""")
     (d/'Input.swift').write_text(stub)
     (d/'main.swift').write_text(r'''import Foundation
+precondition(!ControlServer.mustRevokeRejectedInput(postedEffects: 0, locked: false))
+precondition(ControlServer.mustRevokeRejectedInput(postedEffects: 1, locked: false))
+precondition(ControlServer.mustRevokeRejectedInput(postedEffects: 0, locked: true))
 let port = UInt16(CommandLine.arguments[1])!
 let identity = PairingSession(screenLocked: { false })
 let binding = identity.selectWindow(); precondition(identity.activate(binding))
