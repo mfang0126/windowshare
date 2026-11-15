@@ -99,6 +99,28 @@ for bad in ["/agent/events/", "/agent/events/-1", "/agent/events/abc", "/agent/e
 precondition(kinds(drain()) == ["share_started:capture_started"], "initial share event")
 precondition(reply("GET", "/agent/events/\(cursor)").status == 204, "nothing yet")
 
+// Normal page close: socket or authenticated beacon ends exactly this share, once, without claiming task done.
+for viaHTTP in [false, true] {
+    let closingID = request()
+    let closing = viewer()
+    precondition(phone("POST", "/session/end").status == 401)
+    if viaHTTP {
+        identity.disconnect(closing.context); alive = [] // page was backgrounded before being closed
+        precondition(phone("POST", "/w/\(binding.windowID)/connect", [:], closing.cookies).status == 403)
+        precondition(phone("POST", "/session/end", [:], closing.cookies).status == 200)
+    } else { identity.leave(closing.context, source: "end") }
+    let closed = drain()
+    precondition(kinds(closed) == ["left:page_closed", "cancelled:share_ended", "share_ended:page_closed"])
+    precondition(closed.allSatisfy { $0["request_id"] as? String == closingID })
+    precondition(!shareAlive())
+    identity.leave(closing.context, source: "end")
+    precondition(phone("POST", "/session/end", [:], closing.cookies).status == 401)
+    tick(60); expect([], "close not duplicated")
+    binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
+    precondition(phone("POST", "/session/end", [:], closing.cookies).status == 401, "old cookie cannot end new share")
+    precondition(shareAlive())
+}
+
 // done: request + share end at once (the only event that revokes).
 var id = request()
 var v = viewer()
@@ -225,7 +247,7 @@ binding = identity.selectWindow(); precondition(identity.activate(binding))
 for _ in 0..<40 { _ = request(); _ = reply("GET", "/agent/status"); identity.revokeWindow(); binding = identity.selectWindow(); precondition(identity.activate(binding)) }
 let old = json(reply("GET", "/agent/events/0"))
 precondition((old["events"] as! [Any]).count == PairingSession.eventRetention && old["truncated"] as? Bool == true, "retention")
-print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, leave bound to its own connection, HTTP close before socket leave, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, only done revokes, request id from loss time, last viewer decides")
+print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, leave bound to its own connection, HTTP close before socket leave, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, done and normal page end revoke, request id from loss time, last viewer decides")
 '''
 
 HTTP = r'''import Foundation
@@ -296,11 +318,11 @@ def main():
         src = (ROOT / 'host/Sources/PairingSession.swift').read_text()
         emit = src[src.index('private func emit('):src.index('private func finishRequest(')]
         assert 'print(' not in emit and 'fputs(' not in emit, 'no log line in emit'
-        # The page sends the leave signal on its control socket before clear() closes it; the host accepts only stop/unload.
+        # Normal close ends the share; debug retains the diagnostic stop/unload signals.
         page = (ROOT / 'host/Sources/ViewerPage.swift').read_text()
-        assert "raw({t:'leave',source:'unload'});clear('会话已离开')" in page and "raw({t:'leave',source:'stop'});clear('已停止观看')" in page
+        assert "raw({t:'leave',source:debug?'unload':'end'})" in page and "raw({t:'leave',source:'stop'});clear('已停止观看')" in page
         control = (ROOT / 'host/Sources/ControlServer.swift').read_text()
-        assert 'guard exact(["t", "source"]), let source = object["source"] as? String, ["stop", "unload"].contains(source)' in control
+        assert 'guard exact(["t", "source"]), let source = object["source"] as? String, ["stop", "unload", "end"].contains(source)' in control
 
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]

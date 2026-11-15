@@ -15,6 +15,9 @@ header,section{padding:12px 16px;border-bottom:1px solid #2a3542}header,.actions
 button,input,textarea,select{font:inherit;border:1px solid #526278;border-radius:8px;padding:9px;background:#161d27;color:inherit}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}button[aria-pressed=true]{background:#254b72}
 .actions{margin-top:8px}label{display:block}input,textarea{max-width:100%;width:360px}textarea{min-height:80px}
 main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#stage{position:relative;max-width:100%;line-height:0}img{display:block;max-width:100%;max-height:65dvh;object-fit:contain}#stage.active{touch-action:none}#cursor{position:absolute;pointer-events:none;line-height:1;color:white;text-shadow:0 1px 3px black}[hidden]{display:none!important}
+body:not(.debug)>header,body:not(.debug)>section,body:not(.debug)>#nowin{display:none}
+body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{width:100%}body:not(.debug) img{width:100%;max-height:none}
+#reconnect{position:fixed;right:8px;bottom:8px;font-size:12px;color:#aebccd;background:#0e1218b0;padding:3px 6px;z-index:2}
 </style></head><body>
 <header><h1>WindowShare</h1><span id="state" role="status" aria-live="polite">连接中</span></header>
 <section><div class="actions"><button id="retry">刷新观看</button><button id="close" disabled>关闭会话</button><button id="interact" disabled>开启 Interact</button><button id="view" disabled>返回 View</button></div>
@@ -25,11 +28,13 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
 <div class="actions"><button data-key="enter">Enter</button><button data-key="tab">Tab</button><button data-key="escape">Esc</button><button data-key="backspace">⌫</button><button data-key="left">←</button><button data-key="right">→</button><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="a">A</button><button data-key="c">C</button><button data-key="v">V</button></div></div></section>
 <section id="reqcard" hidden><strong id="reqreason"></strong><p id="reqleft"></p><div class="actions"><button id="reqdone">完成</button><button id="reqcancel">取消</button></div><p id="reqerr" role="alert"></p></section>
 <p id="nowin" hidden role="status">无共享窗口：请在 Mac 菜单栏选择窗口</p>
+<span id="reconnect" hidden role="status">重连中</span>
 <main><div id="stage"><img id="stream" alt="共享窗口画面" draggable="false" hidden><span id="cursor" hidden aria-hidden="true">↖</span></div></main>
 <script>
 (() => {
   let controlsEnabled=false;
   const el=id=>document.getElementById(id), image=el('stream'), stage=el('stage');
+  const debug=location.hash==='#debug';document.body?.classList.toggle('debug',debug);
   // Latency probe (#latency): click → first displayed frame whose brightness flips. Target window: Scripts/latency-target.html.
   const lat=location.hash==='#latency'?(window.__latency={t0:0,from:0,lum:0,ms:[]}):null, lc=lat&&document.createElement('canvas').getContext('2d',{willReadFrequently:true});
   function lum(){lc.drawImage(image,0,0,4,4);const d=lc.getImageData(0,0,4,4).data;let s=0;for(let i=0;i<d.length;i+=4)s+=d[i]+d[i+1]+d[i+2];return s/(48*255);}
@@ -67,7 +72,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
     render();el('state').textContent=message;el('close').disabled=true;
   }
   function recover(message='连接暂时中断；正在自动恢复观看'){
-    clear(message);clearTimeout(reconnectTimer);
+    clear(message);clearTimeout(reconnectTimer);el('reconnect').hidden=stopped||document.hidden;
     if(stopped||document.hidden)return;
     const version=epoch;
     reconnectTimer=setTimeout(()=>{if(version===epoch&&!stopped&&!document.hidden)openView().catch(e=>recover(e.message));},1500);
@@ -87,7 +92,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
     if(noWin)return;
     frameVersion++;clearTimeout(snapshotTimer);snapshotBusy=false;displayedGeometry=null;
     if(frameURL)URL.revokeObjectURL(frameURL);frameURL=null;
-    const version=epoch;image.onload=null;image.onerror=()=>{if(version===epoch){stopMedia();note('画面暂停或不可用。');}};
+    const version=epoch;image.onload=null;image.onerror=()=>{if(version===epoch){recover('画面重连中…');}};
     image.src=base()+'/stream';image.hidden=false;
   }
   async function snapshot(){
@@ -174,7 +179,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
         if(version!==epoch||socket!==ws)return;
         let m;try{m=JSON.parse(event.data);}catch{clear('控制协议错误');return;}
         if(m.t==='heartbeat'){if(!document.hidden)raw({t:'pong',nonce:m.nonce});return;}
-        if(m.t==='state'){state(m);if(!authenticated&&authority){authenticated=true;note('正在观看；需要操作时开启 Interact。');}return;}
+        if(m.t==='state'){el('reconnect').hidden=true;state(m);if(!authenticated&&authority){authenticated=true;note('正在观看；需要操作时开启 Interact。');}return;}
         if(m.t==='ack'||m.t==='error'){
           if(m.t==='error'&&m.retryable===true){pending=null;sentText=null;textQueue=[];latest=finalUp=null;note('这次操作未执行；控制权保留，请确认目标窗口后再操作。');render();return;}
           if(m.t==='error'){leave(m.status==='screenLocked'?'Mac 已锁屏，请先解锁':'控制已停止；操作可能部分执行，请查看窗口结果，不要重复提交。');return;}
@@ -222,6 +227,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   function point(e){const r=image.getBoundingClientRect();if(!r.width||!r.height||!image.naturalWidth)return null;const scale=Math.min(r.width/image.naturalWidth,r.height/image.naturalHeight),w=image.naturalWidth*scale,h=image.naturalHeight*scale;const x=(e.clientX-r.left-(r.width-w)/2)/w,y=(e.clientY-r.top-(r.height-h)/2)/h;return Number.isFinite(x)&&Number.isFinite(y)&&x>=0&&x<=1&&y>=0&&y<=1?{x,y}:null;}
   function drawCursor(){el('cursor').style.left=(cur.x*100)+'%';el('cursor').style.top=(cur.y*100)+'%';}
   stage.addEventListener('pointerdown',e=>{
+    if(!debug&&!ready()&&e.button===0&&point(e)){e.preventDefault();acquire();return;}
     if(!ready()||pending||e.button!==0)return;
     if(pointer){leave('多指手势已取消；请重新开启 Interact');return;}
     const p=point(e);if(!p)return;e.preventDefault();
@@ -258,7 +264,8 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   stage.addEventListener('contextmenu',e=>{if(!ready())return;e.preventDefault();const p=point(e);if(p)input({t:'click',...(el('mode').value==='mouse'?cur:p),button:'right',count:1});});
   stage.addEventListener('wheel',e=>{if(!ready()||!point(e))return;e.preventDefault();const scale=e.deltaMode===1?16:e.deltaMode===2?image.clientHeight:1;input({t:'scroll',dx:Math.max(-4096,Math.min(4096,-e.deltaX*scale)),dy:Math.max(-4096,Math.min(4096,-e.deltaY*scale))});},{passive:false});
   el('mode').onchange=()=>{if(wanted)leave('模式已切换，请重新开启 Interact');};
-  el('interact').onclick=()=>{if(!controlsEnabled||!authority||authority.busy||wanted)return;wanted=true;resetInput();raw({t:'lease.acquire',operation_id:newID(),lease_ttl_sec:300});render();note('正在申请控制权；最多 5 分钟，不自动续期。');};
+  function acquire(){if(!controlsEnabled||!authority||authority.busy||wanted)return;wanted=true;resetInput();raw({t:'lease.acquire',operation_id:newID(),lease_ttl_sec:300});render();note('正在申请控制权；最多 5 分钟，不自动续期。');}
+  el('interact').onclick=acquire;
   el('view').onclick=()=>leave();
   el('keyboard').onclick=()=>{el('keys').hidden=!el('keys').hidden;el('keyboard').setAttribute('aria-expanded',String(!el('keys').hidden));if(!el('keys').hidden)el('text').focus();};
   el('text').addEventListener('compositionstart',()=>composing=true);el('text').addEventListener('compositionend',()=>composing=false);
@@ -269,9 +276,14 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
   window.addEventListener('blur',()=>{if(wanted)leave('页面失去焦点，已返回 View');});
   document.addEventListener('visibilitychange',()=>{if(document.hidden)clear('后台已暂停控制');else if(!stopped)recover();});
   window.addEventListener('online',()=>{if(!stopped)recover();});
-  // Leave signal for the Bot (`left`), sent on the control socket just before clear() closes it: best effort, never sent
-  // by a killed app or without network; a reload rejoins within N and records nothing.
-  window.addEventListener('pagehide',()=>{raw({t:'leave',source:'unload'});clear('会话已离开');});
+  // Normal page departure ends this share. The authenticated beacon also works after background control suspension.
+  // Browser termination or offline departure may deliver neither signal; those remain disconnected, never false done.
+  window.addEventListener('pagehide',()=>{
+    stopped=true;clearTimeout(reconnectTimer);
+    raw({t:'leave',source:debug?'unload':'end'});
+    if(!debug&&binding)navigator.sendBeacon?.('/session/end',new Blob(['{}'],{type:'application/json'}));
+    clear('会话已离开');
+  });
   window.addEventListener('resize',()=>{if(pointer)leave('视口改变，手势已取消');drawCursor();});
   window.visualViewport?.addEventListener('resize',()=>{if(pointer)leave('视口改变，手势已取消');});
   function action(id,fn){el(id).onclick=async()=>{if(busy)return;busy=true;try{await fn();}catch(e){clear(e.message);}finally{busy=false;}};}
@@ -281,7 +293,7 @@ main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#
     const r=await api('/session',binding||(requested?{window_id:requested}:{}),AbortSignal.timeout(5000));
     if(version!==epoch||stopped||document.hidden)return;
     binding={window_id:r.window_id,window_generation:r.window_generation};tuning=r.tuning||{};
-    history.replaceState(null,'',base());watch();
+    history.replaceState(null,'',base()+(debug?'#debug':''));watch();
   }
   action('retry',async()=>{stopped=false;await openView();});
   action('close',async()=>{stopped=true;el('text').value='';clearTimeout(reconnectTimer);raw({t:'leave',source:'stop'});clear('已停止观看');await api('/session/close',{});});

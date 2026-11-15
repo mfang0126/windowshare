@@ -8,7 +8,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 js = (root / 'host/Sources/ViewerPage.swift').read_text().split('<script>')[1].split('</script>')[0]
 js = js.replace('  openView().catch(e=>recover(e.message));', '''
-  globalThis.test={recover,openView,clear,textChunks,queueText,prime(){displayedGeometry=authority.geometry_epoch;},setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
+  globalThis.test={recover,openView,clear,textChunks,queueText,acquire,prime(){displayedGeometry=authority.geometry_epoch;},setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
 ''')
 harness = r'''
 const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
@@ -73,6 +73,12 @@ vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);c
  ws=await pollFails();assert.doesNotMatch(el('state').textContent,/恢复|连接 View/);ws.onclose({code:1001});
  assert.match(el('state').textContent,/共享已结束/,'poll failure hid host end: '+el('state').textContent);assert.equal(timers.size,0);
  ws=await pollFails();const grace=[...timers.values()].find(x=>x.ms===1000);assert(grace);grace.fn();assert([...timers.values()].some(x=>x.ms===1500));
+ // Normal-page acquisition uses the same guarded request, never sends input before geometry matches.
+ ws=await join();ws.onmessage({data:JSON.stringify(st)});const beforeAcquire=sent.length;t.acquire();
+ assert.equal(sent.slice(beforeAcquire).filter(x=>x.t==='lease.acquire').length,1);assert(!sent.slice(beforeAcquire).some(x=>x.t==='click'));
+ const beacons=[];c.Blob=Blob;c.navigator.sendBeacon=(...args)=>{beacons.push(args);return true};
+ events.pagehide();assert.equal(sent.at(-1).source,'end');assert.equal(beacons[0][0],'/session/end');
+ assert.equal(await beacons[0][1].text(),'{}');timers.clear();events.online();assert.equal(timers.size,0);
  console.log('PASS automatic View recovery, background return, no input/lease replay, explicit stop, ended/bare link stops, lease granted note, host exit ends share, done and stop clear the lease note, poll failure does not hide host end');
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''

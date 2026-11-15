@@ -110,6 +110,8 @@ final class PairingSession {
     private var size: [Int] = []
     private var pairs: [String: Pair] = [:]
     private var sessions: [String: Session] = [:]
+    // Close-only authority survives transport suspension; never accepted for frames, tickets or input.
+    private var endSessions: [String: Session] = [:]
     private var expiryTimer: DispatchSourceTimer?
     private var unlockObserver: NSObjectProtocol?
     private var lockObserver: NSObjectProtocol?
@@ -221,7 +223,7 @@ final class PairingSession {
         binding = nil; frame = nil; size = []
         shareDeadline = nil
         geometry = nil; geometryEpoch += 1; frameProvenance = nil; geometrySince = mach_absolute_time()
-        pairs.removeAll(); sessions.removeAll()
+        pairs.removeAll(); sessions.removeAll(); endSessions.removeAll()
     }
     /// `startedAt` (this object's clock): when the agent sent the start command; the 12 hours count from there.
     @discardableResult func selectWindow(startedAt: TimeInterval? = nil) -> Binding {
@@ -283,6 +285,7 @@ final class PairingSession {
         }
         let pairCount = pairs.count, sessionCount = sessions.count
         pairs = pairs.filter { $0.value.deadline > time }
+        endSessions = endSessions.filter { $0.value.deadline > time && $0.value.binding == binding }
         sessions = sessions.filter { $0.value.deadline > time && pairs[$0.value.pair] != nil }
         if pairCount != pairs.count || sessionCount != sessions.count { frame = nil; size = [] }
     }
@@ -452,8 +455,16 @@ final class PairingSession {
     func leave(_ context: Context, source: String) {
         locked {
             guard connections[context.connectionID]?.context == context else { return }
+            if source == "end" { endFromViewer(); return }
             leaveSignals[context.connectionID] = source == "unload" ? "page_unload" : "stop_watching"
         }
+    }
+    /// Called only under the authority lock after authenticating this share's viewer.
+    private func endFromViewer() {
+        guard let ended = binding else { return }
+        emit("left", "page_closed")
+        clearWindow("page_closed")
+        if let shareObserver { deferred.append { shareObserver("page_closed", ended) } }
     }
     func disconnect(_ context: Context) {
         locked {
@@ -625,6 +636,8 @@ final class PairingSession {
                 guard let bearer = Self.secret(), let digest = Self.digest(bearer) else { return error(503) }
                 sessions = sessions.filter { $0.value.pair != key }
                 sessions[digest] = Session(pair: key, binding: pair.binding, deadline: min(now() + 900, pair.deadline))
+                endSessions = endSessions.filter { $0.value.pair != key }
+                endSessions[digest] = sessions[digest]
                 var body = pair.binding.json; body["mode"] = "View"; body["role"] = "human"
                 body["principal_id"] = pair.principal; body["expires_in"] = min(900, pair.deadline - now())
                 body["tuning"] = Tuning.page
@@ -645,6 +658,14 @@ final class PairingSession {
                     if let shareObserver { deferred.append { shareObserver("done", ended) } }
                 }
                 return .json(200, ["status": agentRequest!.status.rawValue])
+            case "/session/end":
+                guard exact([]) else { return error(400) }
+                guard let sessionKey, let session = endSessions[sessionKey], active,
+                      session.binding == binding, session.deadline > now() else { return error(401) }
+                endFromViewer()
+                var reply = Reply.json(200, ["status": "ended"])
+                reply.cookies = [Self.cookie("session")]
+                return reply
             case "/session/close":
                 guard exact([]) else { return error(400) }
                 guard let sessionKey, sessions.removeValue(forKey: sessionKey) != nil else { return error(401) }

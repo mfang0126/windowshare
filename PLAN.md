@@ -6,6 +6,8 @@
 
 2026-11-15 第六轮续做第 0 块：长文本按 128 字符/1024 字节分段并等待逐段确认；零副作用拒绝保留租约，部分执行或锁屏仍撤权。输入录制、Viewer 分段/恢复、真实 loopback WebSocket 锁屏回归及 Swift build 通过；无真实 HID 或真机验收。
 
+2026-11-15 第六轮续做 A：正常分享隐藏全部控件，`#debug` 保留诊断界面；点画面经原安全门申请租约，断线自动恢复观看；关页经 WebSocket 或认证 beacon 发 left/page_closed 并结束共享（刷新同样结束，浏览器未发送信号时仍只能判断连）。Node Viewer、事件与 Swift build 验证，无真机验收。
+
 历史：v1.0.0 已发布（M1 + M2 + M4 完成；M2-b、M2-c 不做）。
 
 2026-11-15 第六轮第 2 项：CLI `list --include-offscreen --json` 返回离屏窗口及 `on_screen`，`--window-id` 可选离屏目标；菜单仍只列屏上窗口。无激活或窗口切换。`verify-offscreen-selection.swift` 与 Swift build 通过，Ego 离屏真实出帧未测。
