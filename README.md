@@ -117,7 +117,7 @@ Phone tap to visible change (`Scripts/latency-run.mjs`, same Wi-Fi over Tailscal
 
 How: in Interact mode the viewer long-polls for the next frame instead of waiting 250 ms after each snapshot; capture runs at 60 fps; frames are sent at 1x size, long edge at most 768 px, JPEG quality 0.4. 12 px text is still readable on the phone. These apply only in Interact mode; view-only mode keeps 2x detail at 15 fps.
 
-Each change can be switched off for comparison: `WINDOWSHARE_M2A_OFF=push,fps,input,small,q4,cap`; `all` restores the pre-M2 behavior. Measurement method: `PLAN.md` (延迟测量方法) and `docs/m2-phone-test.md`.
+Each change can be switched off for comparison: `WINDOWSHARE_M2A_OFF=push,fps,input,small,q4,cap`; `all` restores the pre-M2 behavior. Measurement method: `PLAN.md` (延迟测量方法) and `docs/archive/m2-phone-test.md`.
 
 ## Known behavior
 

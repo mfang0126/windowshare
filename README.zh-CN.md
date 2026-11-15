@@ -108,7 +108,7 @@ python3 Scripts/verify-v1-matrix.py
 
 做法：Interact 时 viewer 长轮询下一帧，不再每张快照后等 250 ms；捕获 60fps；画面按 1x 尺寸、长边最多 768 px、JPEG 质量 0.4。手机上 12 px 文字仍可识别。这些只在 Interact 时生效，只看时仍是 2 倍清晰度、15fps。
 
-每项都可以用环境变量关掉，方便对比：`WINDOWSHARE_M2A_OFF=push,fps,input,small,q4,cap`，填 `all` 回到 M2 之前的行为。测量方法见 `PLAN.md`「延迟测量方法」和 `docs/m2-phone-test.md`。
+每项都可以用环境变量关掉，方便对比：`WINDOWSHARE_M2A_OFF=push,fps,input,small,q4,cap`，填 `all` 回到 M2 之前的行为。测量方法见 `PLAN.md`「延迟测量方法」和 `docs/archive/m2-phone-test.md`。
 
 ## 已知行为
 
