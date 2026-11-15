@@ -47,18 +47,26 @@ timer.resume();RunLoop.main.run()
     with socket.create_connection(('127.0.0.1',port),timeout=.1):break
    except OSError:time.sleep(.02)
   def run(*args,data=None):return subprocess.run([str(root/'Scripts/windowshare-agent'),*args],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,timeout=15)
-  frame=run('frame');assert frame.returncode==0 and frame.stdout==bytes([255,216,255,217]),(frame.returncode,frame.stderr)
+  frame=run('frame');assert frame.returncode==2 and frame.stdout==b'',(frame.returncode,frame.stderr)
+  # Even with safe focus and an acquired Agent lease, no shared-cache pixels may escape.
   click=run('click','.5','.5');assert click.returncode==0,(click.returncode,click.stderr)
   # Each CLI operation has a 15 s timeout: acquire and synchronous input gate must return, not deadlock.
   secret='NEVER_LOG_中文🙂'*40
   text=run('text',data=secret.encode());assert text.returncode==0,(text.returncode,text.stderr)
+  def snapshot(auth='Bearer '+'ab'*32):
+   conn=http.client.HTTPConnection('127.0.0.1',port,timeout=5)
+   conn.request('GET','/agent/snapshot',headers={} if auth is None else {'Authorization':auth})
+   response=conn.getresponse();result=(response.status,response.read());conn.close();return result
+  assert snapshot(None)[0]==401
+  assert snapshot('Bearer '+'cd'*32)[0]==401
+  assert snapshot()==(503,b'{"error":"frame_safety_unproven"}')
   marker.touch();time.sleep(.1)
   blocked=run('frame');assert blocked.returncode==3 and b'handoff_required' in blocked.stdout
   denied=run('text',data=b'never-type-password');assert denied.returncode==3 and b'handoff_required' in denied.stdout
   assert secret.encode() not in text.stdout+text.stderr
-  conn=http.client.HTTPConnection('127.0.0.1',port,timeout=5)
-  conn.request('GET','/agent/snapshot',headers={'Authorization':'Bearer '+'ab'*32})
-  response=conn.getresponse();assert response.status==423 and b'password_focused' in response.read();conn.close()
+  assert snapshot()==(503,b'{"error":"frame_safety_unproven"}')
+  marker.unlink();time.sleep(.1)
+  assert snapshot()==(503,b'{"error":"frame_safety_unproven"}'), 'later safe focus must not revive shared pixels'
   waiter=subprocess.Popen([str(root/'Scripts/windowshare-agent'),'handoff','--reason','fixture login','--timeout','30'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,text=True)
   try:
    waiting=json.loads(waiter.stdout.readline());assert waiting['status']=='waiting_for_page_close'
@@ -71,7 +79,7 @@ timer.resume();RunLoop.main.run()
    out,err=waiter.communicate(timeout=10);assert waiter.returncode==0 and json.loads(out)['status']=='page_closed',(out,err)
   finally:
    if waiter.poll() is None:waiter.terminate();waiter.wait(timeout=5)
-  print('PASS shipped Agent CLI: single frame, click, chunked Chinese text via real restricted lease; sensitive/unknown state hands off without frame or input')
+  print('PASS shipped Agent CLI: snapshot disabled without pixels for safe/sensitive/recovered focus; click and chunked Chinese text via restricted main-thread lease gate; sensitive state hands off')
  finally:
   proc.terminate();_,logs=proc.communicate(timeout=5)
   assert logs.count(b'AX_MAIN') >= 5, 'acquire and input gates must observe AX on main'

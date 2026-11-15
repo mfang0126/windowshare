@@ -4,6 +4,15 @@
 
 **当前：PR #5 第七轮，按 DeepSeek d566516 审查修正；不合并或发布。** 依据 [2026-11-15 产品要求](docs/product/share-page-ux-20261115.md)，先整理文档，再实现零控件分享、手机触控与输入、地址选择、Agent 离屏窗口路径及后台资源暂停，修复长文本和滚动拒绝。帧率暂不调整或测试；只提交 PR 分支，不合并或发布。
 
+## 第七轮密码画面阻塞（2026-11-15，未完成，待拍板）
+
+协调端本轮明确采用临时收紧：认证后的 `/agent/snapshot` 一律返回 `503 frame_safety_unproven`，不读取/返回共享 JPEG；其余 Agent 输入、人类路径及所有帧/几何门禁保持原状。这不是完整密码策略实现，也不是密码安全验收。verify-agent-path.py exit 0：安全/敏感/恢复焦点的认证快照均 503 无像素，错误/缺失凭据 401，click/text 仍经原门禁返回，无真实捕获或输入。
+
+- **现在是什么样**：SCK sample → 主线程读 AX/实时几何 → crop/编码 → `publish`。像素 sample 的 displayTime 早于 AX 观察，两者非原子；即使焦点是按钮或安全搜索框，窗口其他区域仍可能显示密码/验证码。`frameSensitive` 只是一秒内焦点启发式，不是整帧安全证明。人类 stream/snapshot 与 `submit` 的 frame-non-nil 检查仍共用 `PairingSession.frame`；关闭 Agent 出口没有消除人类/门禁缓存，现状仍不满足硬要求。
+- **要改成什么样（候选，未实现）**：人类实时帧按已授权订阅者直接发送，只在编码/有界 in-flight 网络发送中短暂持有，不保留 latest-frame，不支持历史回读；断开、撤权、锁屏、几何变化时丢弃待发内容。long-poll 在下一个获准 publish 时完成，不读取缓存。把授权证明独立成不含 Data 的记录，保留 binding、generation、geometry、epoch、displayTime、size、frameSequence，并且只在原有 sample/crop/配置/发布校验全部通过及编码成功后生成；门禁对证明检查必须与原 frame 存在条件等价，所有旧清空点也清证明。不得用单独 AX 几何观察冒充已发布帧。
+- **卡在哪**：当前 HTTP stream 定时拉 latest-frame、snapshot 重试与 submit 的 frame 条件耦合，需要一次有界发送/订阅生命周期改造；还需明确“发送中短暂内存”的可接受边界和证明产生时机，验证慢客户端、撤权、重连、旧 epoch、编码失败均不复活证明。Agent 重新开放还必须有独立且可证明整帧无敏感内容的来源（目前没有），不能以连续两次 AX 安全、超时或复制同一 JPEG 作为证明。
+- **恢复条件**：上述传输/证明分离与所有门禁等价回归通过，可信非敏感像素来源经确认，独立审查后才重新开放 Agent 快照。普通文本与无注入测试不能替代密码安全验收；不靠放宽门禁解阻塞。
+
 2026-11-15 第七轮第 3 块：/session/close 同步删除 endSessions，已关闭 cookie 的 /session/end 返回 401 且不结束共享。verify-agent-events.py exit 0；旧测试以关闭 cookie 反复重连，现区分可恢复 transport leave 与显式 close，close 后新建共享再继续独立事件案例（无真实网络外连/输入）。
 
 2026-11-15 第七轮第 2 块：核实输入执行及同步 gate 已在 main.async 内；在 Agent gate 和真实 AX 读取入口加主线程断言，不嵌套 main.sync。verify-agent-path.py exit 0：真实 HTTP/WS 驱动 acquire、click、分段 text，替身每次焦点读取断言主线程，各 CLI 15 秒超时保护，全部返回无死锁；无真实 AX/HID。

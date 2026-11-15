@@ -785,12 +785,10 @@ final class PairingSession {
             return .json(200, ["ticket": ticket, "resource": resource, "window_id": binding.windowID, "window_generation": binding.generation])
         }
         if method == "GET", path == "/agent/snapshot" {
-            guard agentFocusAllowed && !frameSensitive else { return .json(423, ["error": "password_focused"]) }
-            guard fields.isEmpty, active, let lease, lease.owner.role == "agent", current(lease.owner), cleanupPending == nil else { return .json(409, ["error": "lease_required"]) }
-            guard let frame, let provenance = frameProvenance, provenance.epoch == geometryEpoch else { return .json(503, ["error": "frame_unavailable"]) }
-            var reply = Reply(status: 200, body: frame, type: "image/jpeg")
-            reply.headers["X-WindowShare-Geometry-Epoch"] = String(provenance.epoch)
-            return reply
+            // AX focus and SCK pixels are not an atomic observation. The shared human
+            // transport cache cannot prove an entire frame is non-sensitive. Fail closed
+            // until a separate, proven-safe Agent frame source exists (see PLAN.md).
+            return .json(503, ["error": "frame_safety_unproven"])
         }
         if method == "POST", path == "/agent/request" {
             guard Set(fields.keys) == ["reason", "timeout_sec"], let reason = fields["reason"] as? String,
