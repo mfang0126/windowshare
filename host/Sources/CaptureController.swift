@@ -70,6 +70,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private var captureSize: [Int] = []
     private var configurationSince: UInt64 = 0
     private var configurationUpdating = false
+    private var privacyReader: (() -> Bool)?
     private var geometryReader: (() -> Result<[Double], PairingSession.GeometryFailure>)?
     var onInvalidated: (() -> Void)?
 
@@ -240,6 +241,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             self.configurationSince = mach_absolute_time()
             let input = InputController(window: window)
             self.geometryReader = { input.measure() }
+            self.privacyReader = { input.sensitiveFocus() }
             self.currentWindow = WindowInfo(
                 id: live.windowID, title: live.title,
                 ownerName: live.owningApplication?.applicationName ?? "(unknown)",
@@ -476,8 +478,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         guard ready else { recordSampleOutcome(.configuration); return }
         guard let identity, let binding else { recordSampleOutcome(.authority); return }
         // This only rejects disagreement; live geometry never supplies a sample's provenance.
-        let reader = lifecycle { geometryReader }
-        let reading = DispatchQueue.main.sync { reader?() } ?? .failure(PairingSession.GeometryFailure(check: .noReader))
+        let (reader, privacy) = lifecycle { (geometryReader, privacyReader) }
+        let (measurement, sensitive) = DispatchQueue.main.sync { (reader?(), privacy?() ?? true) }
+        identity.observeSensitiveFocus(sensitive, binding: binding)
+        let reading = measurement ?? .failure(PairingSession.GeometryFailure(check: .noReader))
         let live = try? reading.get()
         guard identity.observeGeometry(reading, source: .capture, binding: binding) != nil else {
             recordSampleOutcome(live == nil ? .geometryUnavailable : .authority); return

@@ -18,6 +18,8 @@
 
 2026-11-15 第六轮后台 CPU：锁屏或最后一个查看连接离开后暂停 SCStream，清空授权帧；恢复连接/解锁后重启同一捕获目标，异步暂停/恢复/关闭串行化，不改帧率。capture-pause 无注入回归与 Swift build 通过。只读检查 Mac 为 LOCKED，按卡未做 CPU 前后测量、未操作窗口或解锁；实际节省待未锁时测。
 
+2026-11-15 第六轮续做 D：新增本机 Agent connect/snapshot 与 windowshare-agent 客户端，单帧、点击、stdin 中文分段输入均使用同一受限租约；密码或未知 AX 焦点拒绝 Agent 帧/输入，登录交人并等待 page_closed。真实 loopback HTTP/WebSocket + inert poster 跑通客户端三类操作和关页等待；无明文输入日志。密码实时帧/门禁缓存分离仍未实现，后台 Ego AX 与真实出帧未验，不把本轮标为完整真机闭环。
+
 历史：v1.0.0 已发布（M1 + M2 + M4 完成；M2-b、M2-c 不做）。
 
 2026-11-15 第六轮第 2 项：CLI `list --include-offscreen --json` 返回离屏窗口及 `on_screen`，`--window-id` 可选离屏目标；菜单仍只列屏上窗口。无激活或窗口切换。`verify-offscreen-selection.swift` 与 Swift build 通过，Ego 离屏真实出帧未测。

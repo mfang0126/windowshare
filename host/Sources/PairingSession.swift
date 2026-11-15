@@ -44,7 +44,7 @@ final class PairingSession {
         let principal = UUID().uuidString
         let id = UUID().uuidString
     }
-    private struct Session { let pair: String; let binding: Binding; let deadline: TimeInterval; let id = UUID().uuidString }
+    private struct Session { let pair: String; let binding: Binding; let deadline: TimeInterval; let id = UUID().uuidString; var role = "human" }
     struct Context: Equatable {
         let principalID: String
         let pairingID: String
@@ -52,6 +52,7 @@ final class PairingSession {
         let connectionID: String
         let sessionEpoch: String
         let binding: Binding
+        var role = "human"
     }
     private struct Ticket { let session: String; let resource: String; let deadline: TimeInterval }
     private struct Connection {
@@ -107,6 +108,7 @@ final class PairingSession {
     private var binding: Binding?
     private var active = false
     private var linkClaimed = false
+    private var frameSensitive = true
     private var frame: Data?
     private var size: [Int] = []
     private var pairs: [String: Pair] = [:]
@@ -121,6 +123,18 @@ final class PairingSession {
     private var stateObserver: (() -> Void)?
     private var activityObserver: ((Bool) -> Void)?
     private var capturePaused = false
+    private var sensitiveFocus = true
+    private var focusObservedAt: TimeInterval = -.infinity
+    func observeSensitiveFocus(_ sensitive: Bool, binding expected: Binding) {
+        locked {
+            guard binding == expected else { return }
+            sensitiveFocus = sensitive; focusObservedAt = now()
+            if sensitive { frameSensitive = true }
+            if sensitive, lease?.owner.role == "agent" { revokeLease("sensitiveFocus") }
+        }
+    }
+    private var agentFocusAllowed: Bool { !sensitiveFocus && now() - focusObservedAt <= 1 && !screenLocked() }
+
     func observeCaptureActivity(_ observer: ((Bool) -> Void)?) {
         locked { activityObserver = observer; if let observer { let paused = capturePaused; deferred.append { observer(paused) } } }
     }
@@ -237,6 +251,7 @@ final class PairingSession {
         finishRequest(.cancelled, "share_ended")
         if binding != nil { emit("share_ended", "\(reason)") }
         viewerSeen = false; viewerGoneAt = nil; leaveReason = nil // the share is over: no left / disconnected for it
+        sensitiveFocus = true; focusObservedAt = -.infinity
         active = false; linkClaimed = false // revoke before clearing output and credentials
         binding = nil; frame = nil; size = []
         shareDeadline = nil
@@ -282,7 +297,8 @@ final class PairingSession {
                   frameProvenance.map({ provenance.displayTime > $0.displayTime }) ?? true,
                   data.count <= 16 * 1024 * 1024 else { return }
             frameSequence &+= 1
-            frame = data; self.size = size; frameProvenance = provenance
+            frame = data; frameSensitive = sensitiveFocus || now() - focusObservedAt > 1
+            self.size = size; frameProvenance = provenance
         }
     }
     private func expire() {
@@ -430,7 +446,7 @@ final class PairingSession {
                 connections[id] = nil; leaveSignals[id] = nil; deferred.append(old.cancel)
             }
             let context = Context(principalID: pair.principal, pairingID: pair.id, sessionID: session.id,
-                                  connectionID: UUID().uuidString, sessionEpoch: sessionEpoch, binding: session.binding)
+                                  connectionID: UUID().uuidString, sessionEpoch: sessionEpoch, binding: session.binding, role: session.role)
             connections[context.connectionID] = Connection(context: context, session: issued.session, cancel: cancel,
                                                            pongAt: now(), pingAt: now())
             return context
@@ -511,7 +527,7 @@ final class PairingSession {
         locked {
             expire(); pruneControl()
             guard current(context) else { return nil }
-            var result: [String: Any] = ["t": "state", "mode": "View", "role": "human",
+            var result: [String: Any] = ["t": "state", "mode": "View", "role": context.role,
                 "session_id": context.sessionID, "connection_id": context.connectionID,
                 "session_epoch": context.sessionEpoch, "window_id": context.binding.windowID,
                 "window_generation": context.binding.generation, "geometry_epoch": geometryEpoch,
@@ -533,6 +549,7 @@ final class PairingSession {
             expire(); pruneControl()
             guard current(context), controlAllowed(context), (30...3600).contains(ttl), UUID(uuidString: operation) != nil else { return "rejected" }
             if screenLocked() { return "screenLocked" }
+            if context.role == "agent" && !agentFocusAllowed { return "password_focused" }
             if let lease {
                 return lease.owner == context && lease.operation == operation && lease.ttl == ttl ? "ok" : "busy"
             }
@@ -614,6 +631,7 @@ final class PairingSession {
                   sequence > 0, sequence <= 9_007_199_254_740_991,
                   sequence > value.sequence || (sequence == value.sequence && value.execution == execution) else { return false }
             if screenLocked() { revokeLease("screenLocked"); return false }
+            if context.role == "agent" && !agentFocusAllowed { revokeLease("sensitiveFocus"); return false }
             if !controlAllowed(context) { revokeLease("controlNotAllowed"); return false }
             value.sequence = sequence; value.execution = execution; lease = value
             let accepted = effect()
@@ -753,6 +771,26 @@ final class PairingSession {
     private func agentRoute(method: String, path: String, fields: [String: Any], cookies: [String: String], authorization: String?, loopback: Bool) -> Reply {
         guard loopback, cookies.isEmpty else { return .json(403, ["status": "rejected"]) }
         guard AgentFile.authorized(authorization, token: agentToken) else { return .json(401, ["status": "rejected"]) }
+        if method == "POST", path == "/agent/connect" {
+            guard fields.isEmpty else { return .json(400, ["error": "bad_request"]) }
+            guard active, let binding, cleanupHandler != nil, sessions.count < 64,
+                  let pairToken = Self.secret(), let pairKey = Self.digest(pairToken),
+                  let sessionToken = Self.secret(), let sessionKey = Self.digest(sessionToken),
+                  let ticket = Self.secret(), let ticketKey = Self.digest(ticket) else { return .json(409, ["error": "unavailable"]) }
+            let pair = Pair(binding: binding, deadline: now() + 900); pairs[pairKey] = pair
+            sessions[sessionKey] = Session(pair: pairKey, binding: binding, deadline: now() + 900, role: "agent")
+            let resource = "/w/\(binding.windowID)/events"
+            tickets[ticketKey] = Ticket(session: sessionKey, resource: resource, deadline: now() + 30)
+            return .json(200, ["ticket": ticket, "resource": resource, "window_id": binding.windowID, "window_generation": binding.generation])
+        }
+        if method == "GET", path == "/agent/snapshot" {
+            guard agentFocusAllowed && !frameSensitive else { return .json(423, ["error": "password_focused"]) }
+            guard fields.isEmpty, active, let lease, lease.owner.role == "agent", current(lease.owner), cleanupPending == nil else { return .json(409, ["error": "lease_required"]) }
+            guard let frame, let provenance = frameProvenance, provenance.epoch == geometryEpoch else { return .json(503, ["error": "frame_unavailable"]) }
+            var reply = Reply(status: 200, body: frame, type: "image/jpeg")
+            reply.headers["X-WindowShare-Geometry-Epoch"] = String(provenance.epoch)
+            return reply
+        }
         if method == "POST", path == "/agent/request" {
             guard Set(fields.keys) == ["reason", "timeout_sec"], let reason = fields["reason"] as? String,
                   (1...200).contains(reason.count), !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

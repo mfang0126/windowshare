@@ -222,6 +222,33 @@ final class InputController {
               let value else { return false }
         return CFEqual(target, value)
     }
+    static func sensitiveFocus(role: String?, subrole: String?) -> Bool {
+        guard let role else { return true }
+        if [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) {
+            return subrole == nil || subrole == "AXSecureTextField"
+        }
+        return ![kAXButtonRole, kAXCheckBoxRole, kAXRadioButtonRole, kAXWindowRole, kAXScrollAreaRole, "AXWebArea", "AXLink", kAXListRole].contains(role)
+    }
+    /// Unknown accessibility state is sensitive; only role/subrole are read, never values or text.
+    func sensitiveFocus() -> Bool {
+        #if WINDOWSHARE_TEST
+        return true
+        #else
+        guard !isLocked() else { return true }
+        var focusedWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(window.ownerPID), kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
+              let focusedWindow, CFGetTypeID(focusedWindow) == AXUIElementGetTypeID(),
+              Self.windowID(focusedWindow as! AXUIElement) == window.id else { return true }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(window.ownerPID), kAXFocusedUIElementAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return true }
+        let element = value as! AXUIElement
+        var role: CFTypeRef?, subrole: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        _ = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+        return Self.sensitiveFocus(role: role as? String, subrole: subrole as? String)
+        #endif
+    }
     /// Metadata only: never read AXValue, selected text, labels or password contents.
     func focusedTextEntry() -> Bool {
         #if WINDOWSHARE_TEST

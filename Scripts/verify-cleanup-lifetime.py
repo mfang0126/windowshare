@@ -36,6 +36,7 @@ final class InputController {
     var held = false
     var succeeds = true
     var onCleanup: (() -> Void)?
+    func sensitiveFocus() -> Bool { true }
     func focusedTextEntry() -> Bool { false }
     func geometry() -> [Double]? { [0, 0, 800, 600, 2] }
     func measure() -> Result<[Double], PairingSession.GeometryFailure> { .success([0, 0, 800, 600, 2]) }

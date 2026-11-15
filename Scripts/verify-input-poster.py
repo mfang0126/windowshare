@@ -20,6 +20,11 @@ final class PairingSession {
 ''')
     (d/'main.swift').write_text('''import Foundation
 import CoreGraphics
+precondition(InputController.sensitiveFocus(role: nil, subrole: nil))
+precondition(InputController.sensitiveFocus(role: "AXTextField", subrole: "AXSecureTextField"))
+precondition(InputController.sensitiveFocus(role: "AXTextField", subrole: nil))
+precondition(!InputController.sensitiveFocus(role: "AXTextField", subrole: "AXUnknown"))
+precondition(!InputController.sensitiveFocus(role: "AXButton", subrole: nil))
 let window = WindowInfo(id: 0, ownerPID: 0)
 if CommandLine.arguments.contains("guard") {
  let input = InputController(window: window, isLocked: { false })

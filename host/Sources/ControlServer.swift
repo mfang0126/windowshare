@@ -238,8 +238,19 @@ final class ControlServer {
         if type == "lease.acquire" {
             guard exact(["t", "operation_id", "lease_ttl_sec"]), let operation = object["operation_id"] as? String,
                   let ttl = Self.integer(object["lease_ttl_sec"]) else { status("rejected"); return }
-            status(identity.acquire(context, operation: operation, ttl: ttl))
-            if let state = identity.state(context) { reply(state, client) }; return
+            if context.role == "agent" {
+                DispatchQueue.main.async { [self] in
+                    identity.observeSensitiveFocus(input?.sensitiveFocus() ?? true, binding: context.binding)
+                    queue.async {
+                        status(self.identity.acquire(context, operation: operation, ttl: ttl))
+                        if let state = self.identity.state(context) { self.reply(state, client) }
+                    }
+                }
+            } else {
+                status(identity.acquire(context, operation: operation, ttl: ttl))
+                if let state = identity.state(context) { reply(state, client) }
+            }
+            return
         }
         if type == "lease.release" {
             guard exact(["t", "lease_id", "lease_epoch", "decision_id"]), let id = object["lease_id"] as? String,
@@ -304,6 +315,7 @@ final class ControlServer {
                 diagnostic.stage = .gateGeometry
                 guard identity.observeGeometry(input.measure(), source: .commitGate, binding: context.binding) == geometry else { return false }
                 diagnostic.stage = .submitAuthority
+                if context.role == "agent" { identity.observeSensitiveFocus(input.sensitiveFocus(), binding: context.binding) }
                 return identity.submit(context, id: id, epoch: epoch, sequence: sequence, generation: generation,
                                        geometry: geometry, execution: execution, effect: effect)
             }

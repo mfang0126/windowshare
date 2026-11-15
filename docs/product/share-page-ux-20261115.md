@@ -32,6 +32,10 @@ AI 主要取单帧，不录像；录短片只用在 debug 里排查闪烁和卡�
 
 Orca 或 Skills 拿到链接就取帧、发点击或输入；遇到登录就把链接交给用户，等用户关掉页面。Ego 后台 Space 里的页面必须能选到。
 
+本机 Agent 命令：`Scripts/windowshare-agent frame` 输出单帧到 stdout，`click 0.5 0.5` 使用归一化坐标，`text` 从 stdin 读文本并逐段确认，`handoff --reason "请完成登录后关闭分享页"` 返回人用链接并等关页事件。依赖 Python 的 websocket-client；凭据从 agent.json 读取，不进入命令行或日志。Agent 的连接票据、租约和输入走与人相同的控制通道，密码/未知焦点拒绝 Agent 取帧与输入，转入交人路径；关页只表示交接结束，不表示业务成功。
+
+Agent 焦点分类只读取目标窗口的 AX role/subrole；secure text field、无法读取或无法确认目标焦点时拒绝。后台页面的 AX 可用性与密码画面严格不缓存要求仍需后续验证和管线改造，不把已有截图接口当成密码安全验收。
+
 ## 验收怎么测
 
 帧率在正常分享页的接收端按真实呈现的帧数来数，前台、后台、恢复三段都要测；人用和 Agent 用两条路径都要覆盖。
