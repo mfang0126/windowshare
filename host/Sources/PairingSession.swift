@@ -99,8 +99,14 @@ final class PairingSession {
         let session: String
         let binding: Binding
         let cancel: () -> Void
+        var send: ((Data, UInt64) -> Void)?
     }
     private var streams: [UUID: Stream] = [:]
+    private struct SnapshotWaiter {
+        let stream: Stream
+        let commit: (Reply) -> Void
+    }
+    private var snapshots: [UUID: SnapshotWaiter] = [:]
     private var frameSequence: UInt64 = 0
     private let lock = NSLock()
     private let now: () -> TimeInterval
@@ -109,7 +115,6 @@ final class PairingSession {
     private var active = false
     private var linkClaimed = false
     private var frameSensitive = true
-    private var frame: Data?
     private var size: [Int] = []
     private var pairs: [String: Pair] = [:]
     private var sessions: [String: Session] = [:]
@@ -142,12 +147,12 @@ final class PairingSession {
         let paused = screenLocked() || ((viewerSeen || capturePaused) && connections.isEmpty)
         guard paused != capturePaused else { return }
         capturePaused = paused
-        if paused { frame = nil; size = []; frameProvenance = nil; geometrySince = mach_absolute_time() }
+        if paused { frameProvenance = nil; size = []; geometrySince = mach_absolute_time() }
         if let activityObserver { deferred.append { activityObserver(paused) } }
     }
     func shouldPauseCapture(_ expected: Binding) -> Bool { locked { binding != expected || capturePaused } }
     func discardFrames(_ expected: Binding) {
-        locked { if binding == expected { frame = nil; size = []; frameProvenance = nil; geometrySince = mach_absolute_time() } }
+        locked { if binding == expected { frameProvenance = nil; size = []; geometrySince = mach_absolute_time() } }
     }
     static let cleanupRetryCap: TimeInterval = 30
     static func cleanupRetryDelay(failures: Int) -> TimeInterval {
@@ -253,7 +258,7 @@ final class PairingSession {
         viewerSeen = false; viewerGoneAt = nil; leaveReason = nil // the share is over: no left / disconnected for it
         sensitiveFocus = true; focusObservedAt = -.infinity
         active = false; linkClaimed = false // revoke before clearing output and credentials
-        binding = nil; frame = nil; size = []
+        binding = nil; frameProvenance = nil; size = []
         shareDeadline = nil
         geometry = nil; geometryEpoch += 1; frameProvenance = nil; geometrySince = mach_absolute_time()
         pairs.removeAll(); sessions.removeAll(); endSessions.removeAll(); resumeTickets.removeAll()
@@ -297,8 +302,22 @@ final class PairingSession {
                   frameProvenance.map({ provenance.displayTime > $0.displayTime }) ?? true,
                   data.count <= 16 * 1024 * 1024 else { return }
             frameSequence &+= 1
-            frame = data; frameSensitive = sensitiveFocus || now() - focusObservedAt > 1
+            frameSensitive = sensitiveFocus || now() - focusObservedAt > 1
             self.size = size; frameProvenance = provenance
+            // Consume only already-armed subscriptions. No latest pixels and no per-peer backlog.
+            for id in Array(streams.keys) {
+                guard let stream = streams[id], valid(stream), let send = stream.send else { continue }
+                streams[id]?.send = nil
+                send(data, frameSequence)
+            }
+            for id in Array(snapshots.keys) {
+                guard let waiter = snapshots.removeValue(forKey: id) else { continue }
+                guard valid(waiter.stream), !screenLocked() else { waiter.commit(.json(503, ["error": "frame_unavailable"])); continue }
+                var reply = Reply(status: 200, body: data, type: "image/jpeg")
+                reply.headers["X-WindowShare-Geometry-Epoch"] = String(provenance.epoch)
+                reply.headers["X-WindowShare-Frame-Seq"] = String(frameSequence)
+                waiter.commit(reply)
+            }
         }
     }
     private func expire() {
@@ -322,7 +341,7 @@ final class PairingSession {
         resumeTickets = resumeTickets.filter { $0.value.deadline > time && $0.value.binding == binding }
         endSessions = endSessions.filter { $0.value.deadline > time && $0.value.binding == binding }
         sessions = sessions.filter { $0.value.deadline > time && pairs[$0.value.pair] != nil }
-        if pairCount != pairs.count || sessionCount != sessions.count { frame = nil; size = [] }
+        if pairCount != pairs.count || sessionCount != sessions.count { frameProvenance = nil; size = [] }
     }
 
     private func valid(_ stream: Stream) -> Bool {
@@ -332,6 +351,10 @@ final class PairingSession {
         return pair.binding == stream.binding
     }
     private func pruneStreams() {
+        for (id, waiter) in snapshots where !valid(waiter.stream) || screenLocked() {
+            snapshots[id] = nil
+            waiter.stream.cancel()
+        }
         for (id, stream) in streams where !valid(stream) {
             streams[id] = nil
             stream.cancel() // Must be nonblocking; never reenter this authority.
@@ -356,13 +379,34 @@ final class PairingSession {
         }
     }
     func closeStream(_ id: UUID) { locked { streams[id] = nil } }
-    /// Called only when the peer has no send in flight. No per-peer frame queue.
-    func sendFrame(_ id: UUID, after sequence: UInt64, commit: (Data, UInt64) -> Void) {
+    /// Arm one future publication; called only with no send in flight. Never replay pixels.
+    func sendFrame(_ id: UUID, after sequence: UInt64, commit: @escaping (Data, UInt64) -> Void) {
         locked {
-            expire()
-            guard let stream = streams[id], valid(stream), frameSequence != sequence, let frame else { return }
-            commit(frame, frameSequence)
+            guard let stream = streams[id], valid(stream) else { return }
+            streams[id]?.send = commit
         }
+    }
+    /// Snapshot responses also subscribe before publication; the timeout carries no pixels.
+    func waitSnapshot(path: String, cookies: [String: String], cancel: @escaping () -> Void,
+                      commit: @escaping (Reply) -> Void) -> UUID? {
+        locked {
+            let check = route(method: "GET", path: path, fields: [:], cookies: cookies, authorization: nil, loopback: false)
+            guard check.status == 503,
+                  let key = Self.digest(cookies["ws-session"]), let session = sessions[key],
+                  snapshots.count < 32, !screenLocked() else { commit(check); return nil }
+            let base = "/w/\(session.binding.windowID)/snapshot"
+            guard path == base || (Tuning.push && path.hasPrefix(base + "/") && UInt64(path.dropFirst(base.count + 1)) != nil) else {
+                commit(check); return nil
+            }
+            let stream = Stream(session: key, binding: session.binding, cancel: cancel)
+            guard valid(stream) else { commit(check); return nil }
+            let id = UUID()
+            snapshots[id] = SnapshotWaiter(stream: stream, commit: commit)
+            return id
+        }
+    }
+    func finishSnapshot(_ id: UUID) {
+        locked { snapshots.removeValue(forKey: id)?.commit(.json(503, ["error": "frame_unavailable"])) }
     }
 
     // H2: callbacks must enqueue work, never synchronously wait for the main queue.
@@ -611,7 +655,7 @@ final class PairingSession {
                     geometryEpoch += 1; revokeLease("geometryChanged")
                 }
                 geometrySince = mach_absolute_time()
-                frame = nil; size = []; frameProvenance = nil
+                frameProvenance = nil; size = []
             }
             geometry = value
             return geometryEpoch
@@ -626,7 +670,7 @@ final class PairingSession {
             guard current(context), cleanupPending == nil, var value = lease,
                   value.owner == context, value.id == id, value.epoch == epoch,
                   value.deadline > now(), generation == context.binding.generation,
-                  geometry == geometryEpoch, self.geometry != nil, frame != nil,
+                  geometry == geometryEpoch, self.geometry != nil, frameProvenance != nil,
                   frameProvenance?.epoch == geometryEpoch,
                   sequence > 0, sequence <= 9_007_199_254_740_991,
                   sequence > value.sequence || (sequence == value.sequence && value.execution == execution) else { return false }
@@ -728,7 +772,7 @@ final class PairingSession {
                 // 「停止观看」 is also a leave signal for this session's own viewer connections, whichever of this POST and
                 // the socket's `leave` message the host handles first.
                 for (id, connection) in connections where connection.session == sessionKey { leaveSignals[id] = "stop_watching" }
-                frame = nil; size = []
+                frameProvenance = nil; size = []
                 var reply = Reply.json(200, ["status": "closed"]); if authorization == nil { reply.cookies = [Self.cookie("session")] }; return reply
             default:
                 guard exact([]), let sessionKey, let session = sessions[sessionKey],
@@ -751,20 +795,15 @@ final class PairingSession {
         }
         if path == base + "/meta" {
             var body = session.binding.json
-            body["available"] = frame != nil; body["size"] = size; body["dpi"] = "unknown"
+            body["available"] = frameProvenance != nil; body["size"] = size; body["dpi"] = "unknown"
             body["mode"] = "View"; body["disabled_reason"] = "controls_not_enabled"
             body["server_time"] = Date().timeIntervalSince1970
             return .json(200, body)
         }
-        // `/snapshot/<seq>`: 204 until a frame newer than seq exists; HTTPServer retries it as a long poll.
+        // Synchronous callers cannot retrieve pixels. HTTP registers a future-only subscription.
         let after = path.hasPrefix(base + "/snapshot/") && Tuning.push ? UInt64(path.dropFirst(base.count + 10)) : nil
         if path == base + "/snapshot" || after != nil {
-            guard let frame, let provenance = frameProvenance, provenance.epoch == geometryEpoch else { return error(503) }
-            if after == frameSequence { return Reply(status: 204, body: Data(), type: "image/jpeg") }
-            var reply = Reply(status: 200, body: frame, type: "image/jpeg")
-            reply.headers["X-WindowShare-Geometry-Epoch"] = String(provenance.epoch)
-            reply.headers["X-WindowShare-Frame-Seq"] = String(frameSequence)
-            return reply
+            return .json(503, ["error": "frame_unavailable"])
         }
         return error(403)
     }
