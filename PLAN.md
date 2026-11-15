@@ -4,6 +4,8 @@
 
 **当前：PR #5 第七轮，按 DeepSeek d566516 审查修正；不合并或发布。** 依据 [2026-11-15 产品要求](docs/product/share-page-ux-20261115.md)，先整理文档，再实现零控件分享、手机触控与输入、地址选择、Agent 离屏窗口路径及后台资源暂停，修复长文本和滚动拒绝。帧率暂不调整或测试；只提交 PR 分支，不合并或发布。
 
+2026-11-15 第七轮第 2 块：核实输入执行及同步 gate 已在 main.async 内；在 Agent gate 和真实 AX 读取入口加主线程断言，不嵌套 main.sync。verify-agent-path.py exit 0：真实 HTTP/WS 驱动 acquire、click、分段 text，替身每次焦点读取断言主线程，各 CLI 15 秒超时保护，全部返回无死锁；无真实 AX/HID。
+
 2026-11-15 第七轮第 1 块：文本角色仅显式 AXSearchField 子角色视为非敏感，nil、AXUnknown、secure、自定义/空子角色默认拒绝；自动键盘复用相同分类。verify-input-poster.py exit 0（recording poster，无真实输入）；普通字段若仅暴露 AXUnknown 也交给人，不为兼容放宽。
 
 2026-11-15 第六轮续做第 0 块：长文本按 128 字符/1024 字节分段并等待逐段确认；零副作用拒绝保留租约，部分执行或锁屏仍撤权。输入录制、Viewer 分段/恢复、真实 loopback WebSocket 锁屏回归及 Swift build 通过；无真实 HID 或真机验收。

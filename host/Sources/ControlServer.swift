@@ -315,7 +315,12 @@ final class ControlServer {
                 diagnostic.stage = .gateGeometry
                 guard identity.observeGeometry(input.measure(), source: .commitGate, binding: context.binding) == geometry else { return false }
                 diagnostic.stage = .submitAuthority
-                if context.role == "agent" { identity.observeSensitiveFocus(input.sensitiveFocus(), binding: context.binding) }
+                if context.role == "agent" {
+                    // perform and its gate execute synchronously inside the main.async above,
+                    // just like lease.acquire. Never main.sync here: that would self-deadlock.
+                    precondition(Thread.isMainThread, "Agent focus must be observed on the main thread")
+                    identity.observeSensitiveFocus(input.sensitiveFocus(), binding: context.binding)
+                }
                 return identity.submit(context, id: id, epoch: epoch, sequence: sequence, generation: generation,
                                        geometry: geometry, execution: execution, effect: effect)
             }

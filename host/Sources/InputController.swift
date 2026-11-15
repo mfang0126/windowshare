@@ -233,6 +233,7 @@ final class InputController {
     }
     /// Unknown accessibility state is sensitive; only role/subrole are read, never values or text.
     func sensitiveFocus() -> Bool {
+        precondition(Thread.isMainThread, "AX focus must be read on the main thread")
         #if WINDOWSHARE_TEST
         return true
         #else

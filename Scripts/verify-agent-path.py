@@ -7,7 +7,7 @@ ns={'__name__':'fixture','__file__':str(root/'Scripts/verify-cleanup-lifetime.py
 exec((root/'Scripts/verify-cleanup-lifetime.py').read_text(),ns)
 with tempfile.TemporaryDirectory(prefix='ws-agent-') as tmp:
  d=Path(tmp)
- stub=ns['STUB'].replace('func sensitiveFocus() -> Bool { true }','func sensitiveFocus() -> Bool { FileManager.default.fileExists(atPath: CommandLine.arguments[2]) }')
+ stub=ns['STUB'].replace('func sensitiveFocus() -> Bool { true }','func sensitiveFocus() -> Bool { precondition(Thread.isMainThread); fputs("AX_MAIN\\n", stderr); return FileManager.default.fileExists(atPath: CommandLine.arguments[2]) }')
  (d/'Input.swift').write_text(stub)
  (d/'main.swift').write_text(r'''import Foundation
 let port=UInt16(CommandLine.arguments[1])!
@@ -49,6 +49,7 @@ timer.resume();RunLoop.main.run()
   def run(*args,data=None):return subprocess.run([str(root/'Scripts/windowshare-agent'),*args],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,timeout=15)
   frame=run('frame');assert frame.returncode==0 and frame.stdout==bytes([255,216,255,217]),(frame.returncode,frame.stderr)
   click=run('click','.5','.5');assert click.returncode==0,(click.returncode,click.stderr)
+  # Each CLI operation has a 15 s timeout: acquire and synchronous input gate must return, not deadlock.
   secret='NEVER_LOG_中文🙂'*40
   text=run('text',data=secret.encode());assert text.returncode==0,(text.returncode,text.stderr)
   marker.touch();time.sleep(.1)
@@ -73,4 +74,5 @@ timer.resume();RunLoop.main.run()
   print('PASS shipped Agent CLI: single frame, click, chunked Chinese text via real restricted lease; sensitive/unknown state hands off without frame or input')
  finally:
   proc.terminate();_,logs=proc.communicate(timeout=5)
+  assert logs.count(b'AX_MAIN') >= 5, 'acquire and input gates must observe AX on main'
   assert b'NEVER_LOG' not in logs and b'never-type-password' not in logs,'input leaked into host logs'
