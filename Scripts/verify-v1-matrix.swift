@@ -4,6 +4,37 @@ precondition(!InputController.lockedSession([:]))
 precondition(!InputController.lockedSession(["CGSSessionScreenIsLocked": false]))
 precondition(InputController.lockedSession(["CGSSessionScreenIsLocked": true]))
 precondition(!InputController.lockedSession(["CGSSessionScreenIsLocked": "invalid"]))
+// textEntry(roleError:role:subroleError:subrole:) preconditions
+import ApplicationServices
+// AXTextArea + subroleError .attributeUnsupported -> true
+precondition(InputController.textEntry(roleError: .success, role: kAXTextAreaRole, subroleError: .attributeUnsupported, subrole: nil))
+// AXTextField + subroleError .success + subrole nil -> true
+precondition(InputController.textEntry(roleError: .success, role: kAXTextFieldRole, subroleError: .success, subrole: nil))
+// AXTextField + subroleError .success + subrole "" -> true
+precondition(InputController.textEntry(roleError: .success, role: kAXTextFieldRole, subroleError: .success, subrole: ""))
+// AXTextField + subrole kAXSecureTextFieldSubrole (success) -> false
+precondition(!InputController.textEntry(roleError: .success, role: kAXTextFieldRole, subroleError: .success, subrole: kAXSecureTextFieldSubrole))
+// roleError .failure (role nil) -> false
+precondition(!InputController.textEntry(roleError: .failure, role: nil, subroleError: .success, subrole: nil))
+// roleError .attributeUnsupported with role "AXTextArea" -> false
+precondition(!InputController.textEntry(roleError: .attributeUnsupported, role: "AXTextArea", subroleError: .success, subrole: nil))
+// AXTextArea + subroleError .noValue -> false
+precondition(!InputController.textEntry(roleError: .success, role: kAXTextAreaRole, subroleError: .noValue, subrole: nil))
+// AXTextArea + subroleError .failure -> false
+precondition(!InputController.textEntry(roleError: .success, role: kAXTextAreaRole, subroleError: .failure, subrole: nil))
+// AXTextArea + .cannotComplete -> false
+precondition(!InputController.textEntry(roleError: .success, role: kAXTextAreaRole, subroleError: .cannotComplete, subrole: nil))
+// AXButton + .attributeUnsupported -> false
+precondition(!InputController.textEntry(roleError: .success, role: kAXButtonRole, subroleError: .attributeUnsupported, subrole: nil))
+// AXComboBox + .attributeUnsupported -> false
+precondition(!InputController.textEntry(roleError: .success, role: kAXComboBoxRole, subroleError: .attributeUnsupported, subrole: nil))
+// AXTextField + subrole kAXSearchFieldSubrole (success) -> true (existing behaviour)
+precondition(InputController.textEntry(roleError: .success, role: kAXTextFieldRole, subroleError: .success, subrole: kAXSearchFieldSubrole))
+// Unknown or unreadable subrole on a text role, and a secure field reported as a role, fail closed
+precondition(!InputController.textEntry(roleError: .success, role: kAXTextAreaRole, subroleError: .success, subrole: "AXUnreadableSubrole"))
+precondition(!InputController.textEntry(roleError: .success, role: kAXTextAreaRole, subroleError: .success, subrole: "AXUnknown"))
+precondition(!InputController.textEntry(roleError: .success, role: "AXSecureTextField", subroleError: .attributeUnsupported, subrole: nil))
+
 var clock = 100.0
 let token = String(repeating: "ab", count: 32)
 let secretReason = "SECRET-REASON-登录"

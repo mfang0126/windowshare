@@ -252,6 +252,19 @@ final class InputController {
         return Self.sensitiveFocus(role: role as? String, subrole: subrole as? String)
         #endif
     }
+    /// Pure helper: decides from role/subrole and their AX errors whether the focused element is an editable text entry.
+    static func textEntry(roleError: AXError, role: String?, subroleError: AXError, subrole: String?) -> Bool {
+        guard roleError == .success, let role else { return false }
+        if role == kAXTextAreaRole || role == kAXTextFieldRole {
+            if subroleError == .attributeUnsupported { return true }
+            if subroleError == .success && (subrole == nil || subrole == "") { return true }
+        }
+        guard subroleError == .success else { return false }
+        if [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role), !sensitiveFocus(role: role, subrole: subrole) {
+            return true
+        }
+        return false
+    }
     /// Metadata only: never read AXValue, selected text, labels or password contents.
     func focusedTextEntry() -> Bool {
         #if WINDOWSHARE_TEST
@@ -263,10 +276,11 @@ final class InputController {
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
         let element = value as! AXUIElement
         var role: CFTypeRef?, subrole: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole) == .success else { return false }
-        return [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role as? String ?? "")
-            && !Self.sensitiveFocus(role: role as? String, subrole: subrole as? String)
+        let roleErr = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        let subroleErr = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+        // A subrole value that is present but not a string is undeterminable: mark it so the helper rejects it.
+        let subroleText: String? = subrole == nil ? nil : (subrole as? String ?? "AXUnreadableSubrole")
+        return Self.textEntry(roleError: roleErr, role: role as? String, subroleError: subroleErr, subrole: subroleText)
         #endif
     }
     private func mouse(_ type: CGEventType, point: CGPoint, button: CGMouseButton, count: Int = 1, diagnostic: Diagnostic?, gate: Gate) -> Bool {
