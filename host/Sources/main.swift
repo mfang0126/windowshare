@@ -8,10 +8,12 @@ struct Options {
     var target: CLITarget?
     var interact = false
     var listWindows = false
+    var includeOffscreen = false
     var status = false
     var json = false
     var fallbackDefaultBrowser = false
     var wait = 0
+    var entryPreference: String?
     /// Opener (ADR 0003): label shown to others in 「正在被 X 使用」, the process whose exit ends a normal share,
     /// and `--persistent` (持续分享, only when the boss asks) which is not tied to that process.
     var owner: String?
@@ -67,8 +69,12 @@ func parseOptions() -> Options {
             guard seen.insert("ownerpid").inserted, let value = args.first, (1...10).contains(value.count),
                   value.utf8.allSatisfy({ (48...57).contains($0) }), let pid = Int32(value), pid > 1 else { invalid() }
             opts.ownerPID = pid; args.removeFirst()
+        case "--prefer-network":
+            guard seen.insert("network").inserted, let value = args.first, ["tailscale", "lan"].contains(value) else { invalid() }
+            opts.entryPreference = value; args.removeFirst()
         case "--persistent": opts.persistent = true
         case "--interact": opts.interact = true
+        case "--include-offscreen": opts.includeOffscreen = true
         case "--list-windows": opts.listWindows = true
         case "list" where seen.isEmpty && !opts.listWindows && !opts.status: opts.listWindows = true
         case "status" where seen.isEmpty && !opts.listWindows && !opts.status: opts.status = true
@@ -93,6 +99,8 @@ func parseOptions() -> Options {
 // The share counts from the start command (ADR 0003 rule 2), not from when the window is found (--wait).
 let commandStartedAt = ProcessInfo.processInfo.systemUptime
 let opts = parseOptions()
+if let preference = opts.entryPreference { EntryConfiguration.saveEntryPreference(preference) }
+if opts.includeOffscreen && !opts.listWindows { fputs("--include-offscreen requires list\n", stderr); exit(2) }
 if opts.status { CLI.status(json: opts.json) }
 // One share per Mac: take the lock before anything slow (Tailscale probe, permissions, listeners), so a second
 // request is answered at once with who holds it; no queueing.
@@ -124,9 +132,9 @@ fputs("[startup] m2a_off=\(Tuning.off.sorted().joined(separator: ","))\n", stder
 if opts.listWindows {
     Task {
         do {
-            let windows = try await CaptureController().listWindows()
+            let windows = try await CaptureController().listWindows(includeOffscreen: opts.includeOffscreen)
             if opts.json { print(String(decoding: CLI.listing(windows), as: UTF8.self)) }
-            else { for window in windows { print("\(window.id)\t\(window.ownerName)\t\(window.title ?? "")") } }
+            else { for window in windows { print("\(window.id)\ton_screen=\(window.scWindow.isOnScreen)\t\(window.ownerName)\t\(window.title ?? "")") } }
             exit(0)
         } catch { fputs("window listing failed\n", stderr); exit(1) }
     }

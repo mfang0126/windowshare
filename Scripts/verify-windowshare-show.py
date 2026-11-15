@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline check (no GUI) of Scripts/windowshare-show against a fake loopback host."""
+
 import json, os, subprocess, sys, tempfile, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 

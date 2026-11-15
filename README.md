@@ -89,8 +89,8 @@ Window selection (use exactly one):
 Run from the repo root. They use temporary directories, temporary ports and child processes only; no real window is captured and no mouse or keyboard input is sent:
 
 ```
-swiftc -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-share-lifecycle.swift -o /tmp/verify-share-lifecycle && /tmp/verify-share-lifecycle
-swiftc -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-lifecycle.swift -o /tmp/verify-lifecycle && /tmp/verify-lifecycle
+swiftc -D WINDOWSHARE_TEST -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-share-lifecycle.swift -o /tmp/verify-share-lifecycle && /tmp/verify-share-lifecycle
+swiftc -D WINDOWSHARE_TEST -parse-as-library host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift Scripts/verify-lifecycle.swift -o /tmp/verify-lifecycle && /tmp/verify-lifecycle
 python3 Scripts/verify-share-ending.py
 python3 Scripts/verify-direct-entry.py
 python3 Scripts/verify-cleanup-lifetime.py
@@ -99,6 +99,14 @@ python3 Scripts/verify-windowshare-show.py
 python3 Scripts/verify-host-close.py
 python3 Scripts/verify-geometry-diagnostics.py
 python3 Scripts/verify-agent-events.py
+python3 Scripts/verify-v1-matrix.py
+python3 Scripts/verify-lock-response.py  # requires Python websocket-client
+python3 Scripts/verify-cleanup-push.py  # requires Python websocket-client
+python3 Scripts/verify-input-poster.py
+python3 Scripts/verify-test-isolation.py
+python3 Scripts/verify-lock-mapping.py
+python3 Scripts/verify-keyup-baseline.py
+for case in notification failure-event failure-kind backoff restart; do python3 Scripts/verify-fix4-behavior.py --case "$case" || exit 1; done
 ```
 
 The old `Scripts/verify-morning.sh` checked `/status.json` and `/snapshot.jpg`, which no longer exist; it was removed on 2026-11-13. To check whether the host is running and what it shares, use `Scripts/windowshare status --json`.
@@ -109,7 +117,7 @@ Phone tap to visible change (`Scripts/latency-run.mjs`, same Wi-Fi over Tailscal
 
 How: in Interact mode the viewer long-polls for the next frame instead of waiting 250 ms after each snapshot; capture runs at 60 fps; frames are sent at 1x size, long edge at most 768 px, JPEG quality 0.4. 12 px text is still readable on the phone. These apply only in Interact mode; view-only mode keeps 2x detail at 15 fps.
 
-Each change can be switched off for comparison: `WINDOWSHARE_M2A_OFF=push,fps,input,small,q4,cap`; `all` restores the pre-M2 behavior. Measurement method: `PLAN.md` (延迟测量方法) and `docs/m2-phone-test.md`.
+Each change can be switched off for comparison: `WINDOWSHARE_M2A_OFF=push,fps,input,small,q4,cap`; `all` restores the pre-M2 behavior. Measurement method: `PLAN.md` (延迟测量方法) and `docs/archive/m2-phone-test.md`.
 
 ## Known behavior
 
@@ -136,3 +144,5 @@ Each change can be switched off for comparison: `WINDOWSHARE_M2A_OFF=push,fps,in
 ## License
 
 [MIT](LICENSE)
+
+View capture defaults to 24 fps; set `WINDOWSHARE_VIEW_FPS` to an integer from 2 to 60 to change it. When the Mac is locked, input is blocked and the viewer is asked to unlock it.

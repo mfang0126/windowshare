@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Agent event channel (GET /agent/events/<after>): every event kind, auth, repeated subscribers, no sensitive fields,
 left/disconnected never revoke the share, and the real HTTP long poll (`windowshare-show --events` is in verify-windowshare-show.py). No GUI, capture or input."""
+
 from pathlib import Path
 import http.client, json, os, socket, subprocess, tempfile, threading, time
 
@@ -42,7 +43,7 @@ func drain() -> [[String: Any]] {
     let body = json(r)
     let list = body["events"] as! [[String: Any]]
     for e in list {
-        precondition(Set(e.keys).isSubset(of: ["seq", "kind", "request_id", "at", "reason", "hint"]), "keys \(e.keys)")
+        precondition(Set(e.keys) == Set(["seq", "kind", "request_id", "at", "reason"] + (e["kind"] as? String == "disconnected" ? ["hint"] : [])), "keys \(e.keys)")
         precondition(e["at"] is Double && e["reason"] is String && e["seq"] is Int && e.keys.contains("request_id"))
     }
     cursor = body["next"] as! Int
@@ -53,6 +54,8 @@ func expect(_ want: [String], _ what: String, line: Int = #line) {
     let got = kinds(drain())
     precondition(got == want, "line \(line) \(what): got \(got) want \(want)")
 }
+var viewerCookies: [String: String] = [:]
+var viewerBinding = ""
 var alive: [PairingSession.Context] = [] // viewers that answer heartbeats (a live phone page)
 func tick(_ seconds: Double) { // the 1 s expiry tick, deterministically
     let end = clock + seconds
@@ -63,19 +66,19 @@ func tick(_ seconds: Double) { // the 1 s expiry tick, deterministically
 }
 func viewer(keep: Bool = false) -> (cookies: [String: String], context: PairingSession.Context) {
     if !keep { for c in alive { identity.disconnect(c) } } // one phone page at a time unless asked
-    let r = phone("POST", "/session", ["window_id": binding.windowID])
+    if viewerBinding != binding.windowID { viewerCookies = [:]; viewerBinding = binding.windowID }
+    let r = phone("POST", "/session", ["window_id": binding.windowID], viewerCookies)
     precondition(r.status == 200)
     let kv = r.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
-    let cookies = [kv[0]: kv[1]]
+    let cookies = [kv[0]: kv[1]]; viewerCookies = cookies
     let t = json(phone("POST", "/w/\(binding.windowID)/connect", [:], cookies))
     let context = identity.authenticate(ticket: t["ticket"] as! String, resource: t["resource"] as! String, cancel: {})!
     alive = keep ? alive + [context] : [context]
     return (cookies, context)
 }
-/// What the page does: a `leave` message on its own control socket, the socket closes, then /session/close.
+/// Transport leave keeps resume authority; explicit HTTP close is tested separately below.
 func leave(_ v: (cookies: [String: String], context: PairingSession.Context), _ source: String) {
     identity.leave(v.context, source: source); identity.disconnect(v.context)
-    _ = phone("POST", "/session/close", [:], v.cookies)
     alive.removeAll { $0 == v.context }
 }
 func request(_ timeout: Int = 300) -> String {
@@ -95,7 +98,30 @@ precondition(phone("GET", "/agent/events/0").status == 403, "phone route without
 for bad in ["/agent/events/", "/agent/events/-1", "/agent/events/abc", "/agent/events/99999999999999999999999"] {
     precondition(reply("GET", bad).status == 400, bad)
 }
-precondition(reply("GET", "/agent/events/0").status == 204, "nothing yet")
+precondition(kinds(drain()) == ["share_started:capture_started"], "initial share event")
+precondition(reply("GET", "/agent/events/\(cursor)").status == 204, "nothing yet")
+
+// Normal page close: socket or authenticated beacon ends exactly this share, once, without claiming task done.
+for viaHTTP in [false, true] {
+    let closingID = request()
+    let closing = viewer()
+    precondition(phone("POST", "/session/end").status == 401)
+    if viaHTTP {
+        identity.disconnect(closing.context); alive = [] // page was backgrounded before being closed
+        precondition(phone("POST", "/w/\(binding.windowID)/connect", [:], closing.cookies).status == 403)
+        precondition(phone("POST", "/session/end", [:], closing.cookies).status == 200)
+    } else { identity.leave(closing.context, source: "end") }
+    let closed = drain()
+    precondition(kinds(closed) == ["left:page_closed", "cancelled:share_ended", "share_ended:page_closed"])
+    precondition(closed.allSatisfy { $0["request_id"] as? String == closingID })
+    precondition(!shareAlive())
+    identity.leave(closing.context, source: "end")
+    precondition(phone("POST", "/session/end", [:], closing.cookies).status == 401)
+    tick(60); expect([], "close not duplicated")
+    binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
+    precondition(phone("POST", "/session/end", [:], closing.cookies).status == 401, "old cookie cannot end new share")
+    precondition(shareAlive())
+}
 
 // done: request + share end at once (the only event that revokes).
 var id = request()
@@ -108,6 +134,7 @@ tick(60); expect([], "no left/disconnected after the share ended")
 
 // cancelled by the phone: request ends, share stays.
 binding = identity.selectWindow(); precondition(identity.activate(binding))
+expect(["share_started:capture_started"], "new share")
 id = request(); v = viewer()
 precondition(phone("POST", "/request/decision", ["id": id, "decision": "cancel"], v.cookies).status == 200)
 expect(["cancelled:phone_cancel"], "phone cancel")
@@ -137,8 +164,14 @@ tick(46); expect(["left:page_unload"], "page unload")
 // 「停止观看」 when the HTTP close is handled before the socket's leave message: still left.
 v = viewer(); _ = drain()
 precondition(phone("POST", "/session/close", [:], v.cookies).status == 200); alive = []
+precondition(phone("POST", "/session/end", [:], v.cookies).status == 401, "closed session cannot end share")
+precondition(shareAlive(), "rejected end from closed cookie preserves share")
 identity.leave(v.context, source: "stop"); identity.disconnect(v.context)
 tick(46); expect(["left:stop_watching"], "HTTP close first")
+// Explicit close also removes cookie-based rejoin authority: start a new share for the remaining cases.
+precondition(phone("POST", "/session", ["window_id": binding.windowID], v.cookies).status == 410)
+binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
+id = request(1800)
 // A leave from a connection that is already gone (or never was) changes nothing.
 v = viewer(); _ = drain(); let stale = v.context; identity.disconnect(stale); alive = []
 identity.leave(stale, source: "stop"); tick(46); expect(["disconnected:connection_lost/connection_closed"], "leave after the socket closed")
@@ -170,33 +203,25 @@ v = viewer(); identity.disconnect(v.context); alive = []; tick(2)
 rB = request(1800); tick(45); list = drain()
 precondition(kinds(list) == ["disconnected:connection_lost/connection_closed"] && list[0]["request_id"] is NSNull, "no request at loss: \(list)")
 
-// Several viewers: only the last one to go decides.
-var first = viewer(), second = viewer(keep: true); _ = drain()
-leave(first, "stop")
-tick(50); expect([], "another viewer is still connected")
-identity.disconnect(second.context); alive = []
-tick(46); expect(["disconnected:connection_lost/connection_closed"], "last viewer dropped silently")
-first = viewer(); second = viewer(keep: true); _ = drain()
-identity.disconnect(second.context); alive = [first.context]; tick(5)
-leave(first, "stop")
-tick(46); expect(["left:stop_watching"], "last viewer said it left")
-// A session that never connected cannot relabel another viewer's silent drop (it has no connection to leave from).
+// A second unauthenticated browser cannot redeem the consumed link or influence presence.
 v = viewer(); _ = drain(); identity.disconnect(v.context); alive = []; tick(5)
-let other = phone("POST", "/session", ["window_id": binding.windowID])
-let okv = other.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
-precondition(phone("POST", "/session/close", [:], [okv[0]: okv[1]]).status == 200)
-tick(41); expect(["disconnected:connection_lost/connection_closed"], "unconnected close does not turn a drop into left")
+precondition(phone("POST", "/session", ["window_id": binding.windowID]).status == 410)
+precondition(phone("POST", "/session/close").status == 401)
+tick(41); expect(["disconnected:connection_lost/connection_closed"], "rejected browser cannot relabel a disconnect")
 _ = rA; _ = rB
 
 // A page that closes without ever connecting a viewer records nothing.
 binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
 let lone = phone("POST", "/session", ["window_id": binding.windowID])
 let kv = lone.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
+viewerCookies = [kv[0]:kv[1]]; viewerBinding = binding.windowID
 precondition(phone("POST", "/session/close", [:], [kv[0]: kv[1]]).status == 200)
 tick(60); expect([], "closed without a viewer connection")
 rB = request(1800)
 
-// N is configurable.
+// N is configurable. The previous cookie was explicitly closed; use a fresh share.
+binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
+rB = request(1800)
 PairingSession.leaveGrace = 5
 v = viewer(); _ = drain(); identity.disconnect(v.context); alive = []
 tick(3); expect([], "N=5 not yet"); tick(3); expect(["disconnected:connection_lost/connection_closed"], "N=5")
@@ -222,7 +247,7 @@ binding = identity.selectWindow(); precondition(identity.activate(binding))
 for _ in 0..<40 { _ = request(); _ = reply("GET", "/agent/status"); identity.revokeWindow(); binding = identity.selectWindow(); precondition(identity.activate(binding)) }
 let old = json(reply("GET", "/agent/events/0"))
 precondition((old["events"] as! [Any]).count == PairingSession.eventRetention && old["truncated"] as? Bool == true, "retention")
-print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, leave bound to its own connection, HTTP close before socket leave, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, only done revokes, request id from loss time, last viewer decides")
+print("PASS agent events: done/cancelled/timeout/left(stop,unload)/disconnected(closed,heartbeat)/share_ended, N config, reload within N, leave bound to its own connection, HTTP close before socket leave, auth 401/403/400, repeated readers, reset, retention, no sensitive fields, done and normal page end revoke, request id from loss time, last viewer decides")
 '''
 
 HTTP = r'''import Foundation
@@ -249,11 +274,14 @@ let http = HTTPServer(identity: identity); try! http.start(configuration: config
 identity.configureAgent(token: String(repeating: "ab", count: 32), entry: "http://localhost:\(port)/")
 let binding = identity.selectWindow(); precondition(identity.activate(binding))
 DispatchQueue.global().async {
-    while readLine() != nil { // one fresh viewer (session + ticket) per line
+    var cookies: [String: String] = [:]
+    while readLine() != nil { // same redeemed browser resumes with its cookie
         var r = PairingSession.Reply(status: 0, body: Data())
-        identity.respond(method: "POST", path: "/session", fields: ["window_id": binding.windowID], cookies: [:]) { r = $0 }
+        identity.respond(method: "POST", path: "/session", fields: ["window_id": binding.windowID], cookies: cookies) { r = $0 }
+        precondition(r.status == 200)
         let cookie = String(r.cookies[0].split(separator: ";")[0].dropFirst("ws-session=".count))
-        identity.respond(method: "POST", path: "/w/\(binding.windowID)/connect", fields: [:], cookies: ["ws-session": cookie]) { r = $0 }
+        cookies = ["ws-session": cookie]
+        identity.respond(method: "POST", path: "/w/\(binding.windowID)/connect", fields: [:], cookies: cookies) { r = $0 }
         print(String(decoding: r.body, as: UTF8.self)); fflush(stdout)
     }
 }
@@ -264,7 +292,9 @@ def ws_viewer(proc, cport, hport):
     import base64, struct
     proc.stdin.write('next\n'); proc.stdin.flush()
     line = proc.stdout.readline()
-    while not line.startswith('{'): line = proc.stdout.readline()  # skip the listeners' ready lines
+    while not line.startswith('{'):
+        assert line, 'fixture exited before producing a ticket'
+        line = proc.stdout.readline()  # skip the listeners' ready lines
     ticket = json.loads(line)
     s = socket.create_connection(('127.0.0.1', cport), timeout=5)
     s.sendall((f'GET {ticket["resource"]} HTTP/1.1\r\nHost: localhost:{cport}\r\nOrigin: http://localhost:{hport}\r\nUpgrade: websocket\r\n'
@@ -285,7 +315,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='windowshare-events-') as directory:
         d = Path(directory)
         (d / 'main.swift').write_text(UNIT)
-        subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in SOURCES], str(d / 'main.swift'), '-o', str(d / 'unit')], check=True)
+        subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in SOURCES], str(d / 'main.swift'), '-o', str(d / 'unit')], check=True)
         out = subprocess.run([str(d / "unit")], check=True, stdout=subprocess.PIPE, text=True, timeout=60).stdout
         assert 'SECRET' not in out and TOKEN not in out, 'event log lines carry nothing sensitive'
         print(out.strip().splitlines()[-1])
@@ -293,16 +323,16 @@ def main():
         src = (ROOT / 'host/Sources/PairingSession.swift').read_text()
         emit = src[src.index('private func emit('):src.index('private func finishRequest(')]
         assert 'print(' not in emit and 'fputs(' not in emit, 'no log line in emit'
-        # The page sends the leave signal on its control socket before clear() closes it; the host accepts only stop/unload.
+        # Normal close ends the share; debug retains the diagnostic stop/unload signals.
         page = (ROOT / 'host/Sources/ViewerPage.swift').read_text()
-        assert "raw({t:'leave',source:'unload'});clear('会话已离开')" in page and "raw({t:'leave',source:'stop'});clear('已停止观看')" in page
+        assert "raw({t:'leave',source:debug?'unload':'end'})" in page and "raw({t:'leave',source:'stop'});clear('已停止观看')" in page
         control = (ROOT / 'host/Sources/ControlServer.swift').read_text()
-        assert 'guard exact(["t", "source"]), let source = object["source"] as? String, ["stop", "unload"].contains(source)' in control
+        assert 'guard exact(["t", "source"]), let source = object["source"] as? String, ["stop", "unload", "end"].contains(source)' in control
 
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
         (d / 'main.swift').write_text(HTTP)
-        subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift']],
+        subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift']],
                         str(d / 'main.swift'), '-o', str(d / 'http')], check=True)
         host = subprocess.Popen([str(d / 'http'), str(port), str(d / 'share-id')], stdout=subprocess.DEVNULL)
 
@@ -332,8 +362,11 @@ def main():
                 conn.request('GET', '/agent/events/0', None, {'Host': f'127.0.0.1:{port}', 'Authorization': 'Bearer ' + TOKEN, **extra})
                 r = conn.getresponse(); status = r.status; r.read(); conn.close()
                 assert status == 403, (extra, status)
+            initial = json.loads(call('GET', '/agent/events/0')[1])
+            assert [(e['kind'], e['reason']) for e in initial['events']] == [('share_started', 'capture_started')]
+            cursor = initial['next']
             # Long poll: no event → 204 after about 3 s.
-            started = time.monotonic(); status, _ = call('GET', '/agent/events/0')
+            started = time.monotonic(); status, _ = call('GET', f'/agent/events/{cursor}')
             held = time.monotonic() - started
             assert status == 204 and 2.5 <= held < 4.5, (status, held)
             # A waiting reader wakes as soon as the event happens (the phone cancels the agent's request).
@@ -342,7 +375,7 @@ def main():
             rid = json.loads(b)['id']
             got = {}
             def wait(name):
-                got[name] = (time.monotonic(), call('GET', '/agent/events/0'))
+                got[name] = (time.monotonic(), call('GET', f'/agent/events/{cursor}'))
             readers = [threading.Thread(target=wait, args=(n,)) for n in ('a', 'b')]  # two subscribers at once
             for t in readers: t.start()
             time.sleep(.3)
@@ -357,25 +390,26 @@ def main():
                 events = json.loads(body)['events']
                 assert status == 200 and [(e['kind'], e['reason'], e['request_id']) for e in events] == [('cancelled', 'phone_cancel', rid)], (name, status, body)
                 assert at - closed < 0.5, f'woke {at - closed:.2f}s after the decision'
+            cursor = json.loads(got['a'][1][1])['next']
             assert json.loads(call('GET', '/agent/status')[1])['entry'], 'cancel keeps the share'
             # At most 4 waiting readers; the 5th is refused at once.
             results = []
-            ws = [threading.Thread(target=lambda: results.append(call('GET', '/agent/events/1')[0])) for _ in range(4)]
+            ws = [threading.Thread(target=lambda: results.append(call('GET', f'/agent/events/{cursor}')[0])) for _ in range(4)]
             for t in ws: t.start()
             time.sleep(.5)
-            assert call('GET', '/agent/events/1')[0] == 429
+            assert call('GET', f'/agent/events/{cursor}')[0] == 429
             for t in ws: t.join()
             assert results == [204] * 4, results
             # Waiters that hang up early free their slot at the latest when their 3 s hold ends.
             gone = []
             for _ in range(4):
                 sock = socket.create_connection(('127.0.0.1', port))
-                sock.sendall(f'GET /agent/events/1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n'.encode())
+                sock.sendall(f'GET /agent/events/{cursor} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n'.encode())
                 gone.append(sock)
             time.sleep(.3)
             for sock in gone: sock.close()
             time.sleep(3.5)
-            assert call('GET', '/agent/events/1')[0] == 204, 'slots released after hang-ups'
+            assert call('GET', f'/agent/events/{cursor}')[0] == 204, 'slots released after hang-ups'
             print('PASS HTTP: long poll 204 after ~3 s, two readers woken within 0.5 s by the same cancel, auth/cookie/proxy/Host refused before waiting, 5th waiter 429, hung-up waiters release slots')
 
         finally:
@@ -383,7 +417,7 @@ def main():
 
         # Real control WebSocket: leave message then close → left; close alone → disconnected (N = 1 s here).
         (d / 'main.swift').write_text(WS)
-        subprocess.run(['swiftc', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift', 'ControlServer.swift']],
+        subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *[str(ROOT / 'host/Sources' / f) for f in SOURCES + ['HTTPServer.swift', 'WebAppAssets.swift', 'ControlServer.swift']],
                         str(d / 'main.swift'), '-o', str(d / 'ws')], check=True)
         for _ in range(20):
             with socket.socket() as a, socket.socket() as b:
@@ -402,7 +436,9 @@ def main():
                 if r.status == 200: return json.loads(body)
             raise AssertionError(f'no event after {after}')
         try:
-            cursor = 0
+            initial = feed(0, 8)
+            assert [(e['kind'], e['reason']) for e in initial['events']] == [('share_started', 'capture_started')]
+            cursor = initial['next']
             for leave, want in ((True, ('left', 'stop_watching')), (False, ('disconnected', 'connection_lost')), (True, ('left', 'stop_watching'))):
                 s, send = ws_viewer(proc, hport + 1, hport)
                 time.sleep(.3)

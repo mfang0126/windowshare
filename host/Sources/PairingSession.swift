@@ -44,7 +44,7 @@ final class PairingSession {
         let principal = UUID().uuidString
         let id = UUID().uuidString
     }
-    private struct Session { let pair: String; let binding: Binding; let deadline: TimeInterval; let id = UUID().uuidString }
+    private struct Session { let pair: String; let binding: Binding; let deadline: TimeInterval; let id = UUID().uuidString; var role = "human" }
     struct Context: Equatable {
         let principalID: String
         let pairingID: String
@@ -52,6 +52,7 @@ final class PairingSession {
         let connectionID: String
         let sessionEpoch: String
         let binding: Binding
+        var role = "human"
     }
     private struct Ticket { let session: String; let resource: String; let deadline: TimeInterval }
     private struct Connection {
@@ -59,7 +60,7 @@ final class PairingSession {
         var pongAt: TimeInterval; var nonce: String?; var pingAt: TimeInterval
     }
     private struct Lease {
-        let id: String; let epoch: Int; let owner: Context; let deadline: TimeInterval
+        let id: String; let epoch: Int; let owner: Context; var deadline: TimeInterval
         let operation: String; let ttl: Int
         var sequence = 0
         var execution: UUID?
@@ -71,6 +72,10 @@ final class PairingSession {
     private var leaseEpoch = 0
     private var cleanupSerial = 0
     private var cleanupFailed = false
+    private var cleanupRetryAt: TimeInterval = 0
+    private var cleanupFailures = 0
+    private var cleanupPersistentFailure = false
+    private var cleanupWaitsForUnlock = false
     private func controlAllowed(_ context: Context) -> Bool {
         active && binding == context.binding
     }
@@ -87,25 +92,160 @@ final class PairingSession {
         fileprivate let displayTime: UInt64
         fileprivate let size: [Int]
     }
-    private var frameProvenance: FrameProvenance?
+    /// Pixel-free evidence of an encoded, validated publication. Never minted by AX alone.
+    private struct PublicationProof {
+        let source: FrameProvenance
+        let sequence: UInt64
+        var epoch: Int { source.epoch }
+        var displayTime: UInt64 { source.displayTime }
+    }
+    private var publicationProof: PublicationProof?
     private var retiredOperations: Set<String> = []
     private var releasedDecisions: [String: String] = [:]
     private struct Stream {
         let session: String
         let binding: Binding
         let cancel: () -> Void
+        var send: ((Data, UInt64) -> Void)?
     }
     private var streams: [UUID: Stream] = [:]
+    private struct SnapshotWaiter {
+        let stream: Stream
+        let commit: (Reply) -> Void
+    }
+    private var snapshots: [UUID: SnapshotWaiter] = [:]
     private var frameSequence: UInt64 = 0
     private let lock = NSLock()
     private let now: () -> TimeInterval
+    private let screenLocked: () -> Bool
     private var binding: Binding?
     private var active = false
-    private var frame: Data?
+    private var linkClaimed = false
     private var size: [Int] = []
     private var pairs: [String: Pair] = [:]
     private var sessions: [String: Session] = [:]
+    // Close/reconnect authority survives transport suspension; never directly accepted for frames, tickets or input.
+    private var endSessions: [String: Session] = [:]
+    private var resumeTickets: [String: Session] = [:]
     private var expiryTimer: DispatchSourceTimer?
+    private var unlockObserver: NSObjectProtocol?
+    private var lockObserver: NSObjectProtocol?
+    private let screenNotifications: NotificationCenter
+    private var stateObserver: (() -> Void)?
+    private var activityObserver: ((Bool) -> Void)?
+    private var capturePaused = false
+    private var sensitiveFocus = true
+    private var focusObservedAt: TimeInterval = -.infinity
+    func observeSensitiveFocus(_ sensitive: Bool, binding expected: Binding) {
+        locked {
+            guard binding == expected else { return }
+            sensitiveFocus = sensitive; focusObservedAt = now()
+            if sensitive, lease?.owner.role == "agent" { revokeLease("sensitiveFocus") }
+        }
+    }
+    private var agentFocusAllowed: Bool { !sensitiveFocus && now() - focusObservedAt <= 1 && !screenLocked() }
+
+    func observeCaptureActivity(_ observer: ((Bool) -> Void)?) {
+        locked { activityObserver = observer; if let observer { let paused = capturePaused; deferred.append { observer(paused) } } }
+    }
+    private func updateCaptureActivity() {
+        let paused = screenLocked() || ((viewerSeen || capturePaused) && connections.isEmpty)
+        guard paused != capturePaused else { return }
+        capturePaused = paused
+        if paused { clearPublication(); size = []; geometrySince = mach_absolute_time() }
+        if let activityObserver { deferred.append { activityObserver(paused) } }
+    }
+    func shouldPauseCapture(_ expected: Binding) -> Bool { locked { binding != expected || capturePaused } }
+    func discardFrames(_ expected: Binding) {
+        locked { if binding == expected { clearPublication(); size = []; geometrySince = mach_absolute_time() } }
+    }
+    /// Invalidates both proof and all not-yet-delivered subscriptions. A pre-invalidation sample
+    /// cannot revive authority even if its encoder completes after reconnect/cleanup/unlock.
+    private func clearPublication() {
+        publicationProof = nil
+        geometrySince = mach_absolute_time()
+        for stream in streams.values { stream.cancel() }
+        streams.removeAll()
+        for waiter in snapshots.values { waiter.stream.cancel() }
+        snapshots.removeAll()
+    }
+    struct AgentSnapshotGrant {
+        let binding: Binding
+        let geometry: [Double]
+        let epoch: Int
+        let size: [Int]
+        fileprivate let owner: Context
+        fileprivate let leaseID: String
+        fileprivate let leaseEpoch: Int
+        fileprivate let fence: UInt64
+    }
+    enum AgentSnapshotFailure: Error { case sensitive, unavailable }
+    struct AgentSnapshotFrame { let data: Data; let size: [Int] }
+    typealias AgentSnapshotProvider = (AgentSnapshotGrant, @escaping (Result<AgentSnapshotFrame, AgentSnapshotFailure>) -> Void) -> Void
+    private var agentSnapshotProvider: AgentSnapshotProvider?
+    private var pendingAgentSnapshot: UUID?
+    func installAgentSnapshot(_ provider: @escaping AgentSnapshotProvider) { locked { agentSnapshotProvider = provider } }
+
+    private func agentSnapshotGate() -> Reply? {
+        guard agentFocusAllowed else { return .json(423, ["error": "password_focused"]) }
+        guard active, let lease, lease.owner.role == "agent", current(lease.owner),
+              controlAllowed(lease.owner), lease.deadline > now(), cleanupPending == nil else {
+            return .json(409, ["error": "lease_required"])
+        }
+        guard !capturePaused, let proof = publicationProof, proof.epoch == geometryEpoch,
+              proof.source.binding == binding, proof.source.geometry == geometry,
+              proof.displayTime >= geometrySince else { return .json(503, ["error": "frame_unavailable"]) }
+        return nil
+    }
+    /// Independent capture: authorization before capture and again at the single response commit.
+    /// Provider callbacks contain at most one in-flight frame, never a human-stream frame.
+    func agentSnapshot(authorization: String?, cookies: [String: String], loopback: Bool,
+                       commit: @escaping (Reply) -> Void) {
+        locked {
+            guard loopback, cookies.isEmpty else { commit(.json(403, ["status": "rejected"])); return }
+            guard AgentFile.authorized(authorization, token: agentToken) else { commit(.json(401, ["status": "rejected"])); return }
+            if let failure = agentSnapshotGate() { commit(failure); return }
+            guard pendingAgentSnapshot == nil, let provider = agentSnapshotProvider,
+                  let proof = publicationProof, let lease else { commit(.json(503, ["error": "frame_unavailable"])); return }
+            let id = UUID(); pendingAgentSnapshot = id
+            let grant = AgentSnapshotGrant(binding: lease.owner.binding, geometry: proof.source.geometry,
+                epoch: geometryEpoch, size: proof.source.size, owner: lease.owner,
+                leaseID: lease.id, leaseEpoch: lease.epoch, fence: geometrySince)
+            let finish: (Result<AgentSnapshotFrame, AgentSnapshotFailure>) -> Void = { [weak self] result in
+                guard let self else { return }
+                self.locked {
+                    guard self.pendingAgentSnapshot == id else { return }
+                    self.pendingAgentSnapshot = nil
+                    if let failure = self.agentSnapshotGate() { commit(failure); return }
+                    guard self.binding == grant.binding, self.geometryEpoch == grant.epoch,
+                          self.geometry == grant.geometry, self.geometrySince == grant.fence,
+                          self.lease?.id == grant.leaseID, self.lease?.epoch == grant.leaseEpoch,
+                          self.lease?.owner == grant.owner else { commit(.json(503, ["error": "frame_unavailable"])); return }
+                    switch result {
+                    case .failure(.sensitive): commit(.json(423, ["error": "password_focused"]))
+                    case .failure(.unavailable): commit(.json(503, ["error": "frame_unavailable"]))
+                    case .success(let frame):
+                        guard frame.size == grant.size, !frame.data.isEmpty, frame.data.count <= 16 * 1024 * 1024 else {
+                            commit(.json(503, ["error": "frame_unavailable"])); return
+                        }
+                        var reply = Reply(status: 200, body: frame.data, type: "image/jpeg")
+                        reply.headers["X-WindowShare-Geometry-Epoch"] = String(grant.epoch)
+                        commit(reply)
+                    }
+                }
+            }
+            deferred.append {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) { finish(.failure(.unavailable)) }
+                provider(grant, finish)
+            }
+        }
+    }
+
+    static let cleanupRetryCap: TimeInterval = 30
+    static func cleanupRetryDelay(failures: Int) -> TimeInterval {
+        min(cleanupRetryCap, pow(2, Double(min(5, max(0, failures - 1)))))
+    }
+    func observeState(_ observer: (() -> Void)?) { locked { stateObserver = observer } }
     private var agentToken: String?
     private var agentEntry = ""
     private var agentEntries: [String] = []
@@ -140,21 +280,35 @@ final class PairingSession {
     /// Told (outside the lock) whenever a lease starts or ends, so capture can tune itself for Interact (M2-a).
     func observeInteract(_ observer: ((Bool) -> Void)?) { locked { interactObserver = observer } }
 
-    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, screenLocked: @escaping () -> Bool = InputController.screenLocked, screenNotifications: NotificationCenter = DistributedNotificationCenter.default()) {
+        self.screenNotifications = screenNotifications
         self.now = now
+        self.screenLocked = screenLocked
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "windowshare.expiry"))
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in self?.locked { self?.expire() } }
         timer.resume()
         expiryTimer = timer
+        lockObserver = screenNotifications.addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: nil
+        ) { [weak self] _ in self?.screenDidLock() }
+        unlockObserver = screenNotifications.addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: nil
+        ) { [weak self] _ in self?.locked { self?.cleanupRetryAt = 0 } }
     }
-    deinit { expiryTimer?.cancel() }
+    deinit {
+        expiryTimer?.cancel()
+        if let unlockObserver { screenNotifications.removeObserver(unlockObserver) }
+        if let lockObserver { screenNotifications.removeObserver(lockObserver) }
+    }
+
+    func screenDidLock() { locked { clearPublication(); revokeLease("screenLocked") } }
 
     private func locked<T>(_ action: () -> T) -> T {
         lock.lock()
-        expire(); pruneControl()
+        expire(); pruneControl(); updateCaptureActivity()
         defer {
-            pruneControl(); pruneStreams(); trackPresence()
+            pruneControl(); pruneStreams(); updateCaptureActivity(); trackPresence()
             let work = deferred; deferred.removeAll()
             lock.unlock()
             for callback in work { callback() }
@@ -189,11 +343,12 @@ final class PairingSession {
         finishRequest(.cancelled, "share_ended")
         if binding != nil { emit("share_ended", "\(reason)") }
         viewerSeen = false; viewerGoneAt = nil; leaveReason = nil // the share is over: no left / disconnected for it
-        active = false // revoke before clearing output and credentials
-        binding = nil; frame = nil; size = []
+        sensitiveFocus = true; focusObservedAt = -.infinity
+        active = false; linkClaimed = false // revoke before clearing output and credentials
+        binding = nil; clearPublication(); size = []
         shareDeadline = nil
-        geometry = nil; geometryEpoch += 1; frameProvenance = nil; geometrySince = mach_absolute_time()
-        pairs.removeAll(); sessions.removeAll()
+        geometry = nil; geometryEpoch += 1; clearPublication(); geometrySince = mach_absolute_time()
+        pairs.removeAll(); sessions.removeAll(); endSessions.removeAll(); resumeTickets.removeAll()
     }
     /// `startedAt` (this object's clock): when the agent sent the start command; the 12 hours count from there.
     @discardableResult func selectWindow(startedAt: TimeInterval? = nil) -> Binding {
@@ -207,7 +362,7 @@ final class PairingSession {
     }
     /// Called only after the particular capture start completes. Never revives a stopped selection.
     func activate(_ expected: Binding) -> Bool {
-        locked { guard binding == expected else { return false }; active = true; return true }
+        locked { guard binding == expected else { return false }; if !active { active = true; emit("share_started", "capture_started") }; return true }
     }
     func isCurrent(_ expected: Binding) -> Bool { locked { binding == expected } }
     func revokeWindow(_ expected: Binding? = nil) {
@@ -227,14 +382,28 @@ final class PairingSession {
     func publish(_ data: Data, size: [Int], binding expected: Binding, provenance: FrameProvenance? = nil) {
         locked {
             expire()
-            guard active, binding == expected, let provenance,
+            guard active, !capturePaused, binding == expected, let provenance,
                   provenance.binding == expected,
                   provenance.geometry == geometry, provenance.epoch == geometryEpoch,
                   provenance.displayTime >= geometrySince, provenance.size == size,
-                  frameProvenance.map({ provenance.displayTime > $0.displayTime }) ?? true,
-                  data.count <= 16 * 1024 * 1024 else { return }
+                  publicationProof.map({ provenance.displayTime > $0.displayTime }) ?? true,
+                  !data.isEmpty, data.count <= 16 * 1024 * 1024 else { return }
             frameSequence &+= 1
-            frame = data; self.size = size; frameProvenance = provenance
+            self.size = size; publicationProof = PublicationProof(source: provenance, sequence: frameSequence)
+            // Consume only already-armed subscriptions. No latest pixels and no per-peer backlog.
+            for id in Array(streams.keys) {
+                guard let stream = streams[id], valid(stream), let send = stream.send else { continue }
+                streams[id]?.send = nil
+                send(data, frameSequence)
+            }
+            for id in Array(snapshots.keys) {
+                guard let waiter = snapshots.removeValue(forKey: id) else { continue }
+                guard valid(waiter.stream), !screenLocked() else { waiter.commit(.json(503, ["error": "frame_unavailable"])); continue }
+                var reply = Reply(status: 200, body: data, type: "image/jpeg")
+                reply.headers["X-WindowShare-Geometry-Epoch"] = String(provenance.epoch)
+                reply.headers["X-WindowShare-Frame-Seq"] = String(frameSequence)
+                waiter.commit(reply)
+            }
         }
     }
     private func expire() {
@@ -255,8 +424,10 @@ final class PairingSession {
         }
         let pairCount = pairs.count, sessionCount = sessions.count
         pairs = pairs.filter { $0.value.deadline > time }
+        resumeTickets = resumeTickets.filter { $0.value.deadline > time && $0.value.binding == binding }
+        endSessions = endSessions.filter { $0.value.deadline > time && $0.value.binding == binding }
         sessions = sessions.filter { $0.value.deadline > time && pairs[$0.value.pair] != nil }
-        if pairCount != pairs.count || sessionCount != sessions.count { frame = nil; size = [] }
+        if pairCount != pairs.count || sessionCount != sessions.count { clearPublication(); size = [] }
     }
 
     private func valid(_ stream: Stream) -> Bool {
@@ -266,6 +437,10 @@ final class PairingSession {
         return pair.binding == stream.binding
     }
     private func pruneStreams() {
+        for (id, waiter) in snapshots where !valid(waiter.stream) || screenLocked() {
+            snapshots[id] = nil
+            waiter.stream.cancel()
+        }
         for (id, stream) in streams where !valid(stream) {
             streams[id] = nil
             stream.cancel() // Must be nonblocking; never reenter this authority.
@@ -290,13 +465,34 @@ final class PairingSession {
         }
     }
     func closeStream(_ id: UUID) { locked { streams[id] = nil } }
-    /// Called only when the peer has no send in flight. No per-peer frame queue.
-    func sendFrame(_ id: UUID, after sequence: UInt64, commit: (Data, UInt64) -> Void) {
+    /// Arm one future publication; called only with no send in flight. Never replay pixels.
+    func sendFrame(_ id: UUID, after sequence: UInt64, commit: @escaping (Data, UInt64) -> Void) {
         locked {
-            expire()
-            guard let stream = streams[id], valid(stream), frameSequence != sequence, let frame else { return }
-            commit(frame, frameSequence)
+            guard let stream = streams[id], valid(stream) else { return }
+            streams[id]?.send = commit
         }
+    }
+    /// Snapshot responses also subscribe before publication; the timeout carries no pixels.
+    func waitSnapshot(path: String, cookies: [String: String], cancel: @escaping () -> Void,
+                      commit: @escaping (Reply) -> Void) -> UUID? {
+        locked {
+            let check = route(method: "GET", path: path, fields: [:], cookies: cookies, authorization: nil, loopback: false)
+            guard check.status == 503,
+                  let key = Self.digest(cookies["ws-session"]), let session = sessions[key],
+                  snapshots.count < 32, !screenLocked() else { commit(check); return nil }
+            let base = "/w/\(session.binding.windowID)/snapshot"
+            guard path == base || (Tuning.push && path.hasPrefix(base + "/") && UInt64(path.dropFirst(base.count + 1)) != nil) else {
+                commit(check); return nil
+            }
+            let stream = Stream(session: key, binding: session.binding, cancel: cancel)
+            guard valid(stream) else { commit(check); return nil }
+            let id = UUID()
+            snapshots[id] = SnapshotWaiter(stream: stream, commit: commit)
+            return id
+        }
+    }
+    func finishSnapshot(_ id: UUID) {
+        locked { snapshots.removeValue(forKey: id)?.commit(.json(503, ["error": "frame_unavailable"])) }
     }
 
     // H2: callbacks must enqueue work, never synchronously wait for the main queue.
@@ -306,8 +502,22 @@ final class PairingSession {
     func finishCleanup(epoch: Int, success: @autoclosure () -> Bool) {
         locked {
             guard cleanupPending == epoch, !cleanupFailed else { return }
-            guard success() else { cleanupFailed = true; return }
-            cleanupPending = nil
+            guard success() else {
+                cleanupFailed = true
+                cleanupWaitsForUnlock = screenLocked()
+                if !cleanupWaitsForUnlock {
+                    cleanupFailures += 1
+                    if cleanupFailures >= 3 && !cleanupPersistentFailure {
+                        cleanupPersistentFailure = true
+                        deferred.append { fputs("[session] cleanup failed repeatedly; restart WindowShare if recovery does not complete\n", stderr) }
+                        emit("cleanup_failed", "cleanupFailed")
+                        if let stateObserver { deferred.append(stateObserver) }
+                    }
+                }
+                cleanupRetryAt = now() + Self.cleanupRetryDelay(failures: cleanupFailures)
+                return
+            }
+            cleanupPending = nil; cleanupPersistentFailure = false; cleanupFailures = 0
         }
     }
     private func current(_ context: Context) -> Bool {
@@ -316,18 +526,25 @@ final class PairingSession {
         return valid(Stream(session: connection.session, binding: context.binding, cancel: {}))
     }
     private func scheduleCleanup() {
-        cleanupSerial += 1; cleanupPending = cleanupSerial; cleanupFailed = false
+        cleanupSerial += 1; cleanupPending = cleanupSerial; cleanupFailed = false; cleanupWaitsForUnlock = false; cleanupFailures = 0; cleanupPersistentFailure = false
         if let cleanupHandler { let epoch = cleanupSerial; deferred.append { cleanupHandler(epoch) } }
     }
     private func revokeLease(_ reason: StaticString) {
         guard let previous = lease else { return }
         fputs("[session] lease revoked reason=\(reason)\n", stderr)
         lease = nil
+        clearPublication(); size = []
+        emit("interact_revoked", "\(reason)")
         if let interactObserver { deferred.append { interactObserver(false) } }
         retiredOperations.insert(previous.owner.sessionID + ":" + previous.operation)
         scheduleCleanup()
     }
     private func pruneControl() {
+        if cleanupFailed, !screenLocked(), (cleanupWaitsForUnlock || now() >= cleanupRetryAt), let epoch = cleanupPending, let cleanupHandler {
+            cleanupWaitsForUnlock = false; cleanupFailed = false
+            deferred.append { cleanupHandler(epoch) }
+        }
+        if lease != nil && screenLocked() { revokeLease("screenLocked") }
         tickets = tickets.filter { _, ticket in
             guard ticket.deadline > now(), let session = sessions[ticket.session] else { return false }
             return valid(Stream(session: ticket.session, binding: session.binding, cancel: {}))
@@ -336,10 +553,11 @@ final class PairingSession {
             lossHint = now() - connection.pongAt >= 15 ? "heartbeat_timeout" : "connection_closed"
             leaveReason = leaveSignals.removeValue(forKey: id)
             connections[id] = nil
+            clearPublication(); size = []
             sessions[connection.session] = nil
             deferred.append(connection.cancel)
         }
-        for key in Array(pairs.keys) where !sessions.values.contains(where: { $0.pair == key }) {
+        for key in Array(pairs.keys) where !sessions.values.contains(where: { $0.pair == key }) && !endSessions.values.contains(where: { $0.pair == key }) {
             pairs[key] = nil
         }
         if let lease, lease.deadline <= now() || !current(lease.owner) || !controlAllowed(lease.owner) { revokeLease("expiredOrNotAllowed") }
@@ -356,11 +574,12 @@ final class PairingSession {
                   let session = sessions[issued.session], let pair = pairs[session.pair],
                   valid(Stream(session: issued.session, binding: session.binding, cancel: {})) else { return nil }
             for (id, old) in connections where old.session == issued.session {
+                clearPublication(); size = []
                 if lease?.owner == old.context { revokeLease("reconnect") }
                 connections[id] = nil; leaveSignals[id] = nil; deferred.append(old.cancel)
             }
             let context = Context(principalID: pair.principal, pairingID: pair.id, sessionID: session.id,
-                                  connectionID: UUID().uuidString, sessionEpoch: sessionEpoch, binding: session.binding)
+                                  connectionID: UUID().uuidString, sessionEpoch: sessionEpoch, binding: session.binding, role: session.role)
             connections[context.connectionID] = Connection(context: context, session: issued.session, cancel: cancel,
                                                            pongAt: now(), pingAt: now())
             return context
@@ -404,12 +623,21 @@ final class PairingSession {
     func leave(_ context: Context, source: String) {
         locked {
             guard connections[context.connectionID]?.context == context else { return }
+            if source == "end" { endFromViewer(); return }
             leaveSignals[context.connectionID] = source == "unload" ? "page_unload" : "stop_watching"
         }
+    }
+    /// Called only under the authority lock after authenticating this share's viewer.
+    private func endFromViewer() {
+        guard let ended = binding else { return }
+        emit("left", "page_closed")
+        clearWindow("page_closed")
+        if let shareObserver { deferred.append { shareObserver("page_closed", ended) } }
     }
     func disconnect(_ context: Context) {
         locked {
             guard let connection = connections[context.connectionID], connection.context == context else { return }
+            clearPublication(); size = []
             sessions[connection.session] = nil
         }
     }
@@ -433,13 +661,13 @@ final class PairingSession {
         locked {
             expire(); pruneControl()
             guard current(context) else { return nil }
-            var result: [String: Any] = ["t": "state", "mode": "View", "role": "human",
+            var result: [String: Any] = ["t": "state", "mode": "View", "role": context.role,
                 "session_id": context.sessionID, "connection_id": context.connectionID,
                 "session_epoch": context.sessionEpoch, "window_id": context.binding.windowID,
                 "window_generation": context.binding.generation, "geometry_epoch": geometryEpoch,
                 "controls_enabled": controlAllowed(context),
                 "window": active && binding == context.binding ? "shared" : "none",
-                "busy": lease != nil || cleanupPending != nil]
+                "busy": lease != nil || cleanupPending != nil, "screen_locked": screenLocked(), "cleanup_failed": cleanupPersistentFailure]
             if let request = agentRequest, request.status == .pending {
                 result["request"] = ["id": request.id, "reason": request.reason, "remaining_sec": request.remaining(now())]
             }
@@ -454,22 +682,29 @@ final class PairingSession {
         locked {
             expire(); pruneControl()
             guard current(context), controlAllowed(context), (30...3600).contains(ttl), UUID(uuidString: operation) != nil else { return "rejected" }
+            if screenLocked() { return "screenLocked" }
+            if context.role == "agent" && !agentFocusAllowed { return "password_focused" }
             if let lease {
                 return lease.owner == context && lease.operation == operation && lease.ttl == ttl ? "ok" : "busy"
             }
-            guard cleanupPending == nil, retiredOperations.count < 256,
+            if cleanupPending != nil { return "busy" }
+            guard retiredOperations.count < 256,
                   !retiredOperations.contains(context.sessionID + ":" + operation),
                   let connection = connections[context.connectionID], let session = sessions[connection.session],
                   let pair = pairs[session.pair] else { return "rejected" }
             leaseEpoch += 1
             lease = Lease(id: UUID().uuidString, epoch: leaseEpoch, owner: context,
                           deadline: min(now() + Double(ttl), session.deadline, pair.deadline), operation: operation, ttl: ttl)
+            emit("interact_granted", "lease_acquired")
             if let interactObserver { deferred.append { interactObserver(true) } }
             return "ok"
         }
     }
+    func hasLease(_ context: Context, id: String, epoch: Int) -> Bool {
+        locked { lease?.owner == context && lease?.id == id && lease?.epoch == epoch }
+    }
     func cancelInput(_ context: Context, id: String, epoch: Int) {
-        locked { if let lease, lease.owner == context, lease.id == id, lease.epoch == epoch { revokeLease("rejectedInput") } }
+        locked { if let lease, lease.owner == context, lease.id == id, lease.epoch == epoch { if screenLocked() { revokeLease("screenLocked") } else { revokeLease("rejectedInput") } } }
     }
     func release(_ context: Context, id: String, epoch: Int, decision: String) -> String {
         locked {
@@ -510,7 +745,7 @@ final class PairingSession {
                     geometryEpoch += 1; revokeLease("geometryChanged")
                 }
                 geometrySince = mach_absolute_time()
-                frame = nil; size = []; frameProvenance = nil
+                clearPublication(); size = []
             }
             geometry = value
             return geometryEpoch
@@ -525,13 +760,24 @@ final class PairingSession {
             guard current(context), cleanupPending == nil, var value = lease,
                   value.owner == context, value.id == id, value.epoch == epoch,
                   value.deadline > now(), generation == context.binding.generation,
-                  geometry == geometryEpoch, self.geometry != nil, frame != nil,
-                  frameProvenance?.epoch == geometryEpoch,
+                  geometry == geometryEpoch, self.geometry != nil, publicationProof != nil,
+                  publicationProof?.epoch == geometryEpoch,
+                  publicationProof?.source.binding == context.binding,
+                  publicationProof?.source.geometry == self.geometry,
+                  publicationProof!.displayTime >= geometrySince,
                   sequence > 0, sequence <= 9_007_199_254_740_991,
                   sequence > value.sequence || (sequence == value.sequence && value.execution == execution) else { return false }
+            if screenLocked() { revokeLease("screenLocked"); return false }
+            if context.role == "agent" && !agentFocusAllowed { revokeLease("sensitiveFocus"); return false }
             if !controlAllowed(context) { revokeLease("controlNotAllowed"); return false }
             value.sequence = sequence; value.execution = execution; lease = value
-            return effect()
+            let accepted = effect()
+            if accepted, let connection = connections[context.connectionID], let session = sessions[connection.session],
+               let pair = pairs[session.pair] {
+                value.deadline = min(now() + 300, session.deadline, pair.deadline)
+                lease = value
+            }
+            return accepted
         }
     }
 
@@ -546,7 +792,7 @@ final class PairingSession {
         if path.hasPrefix("/agent/") { return agentRoute(method: method, path: path, fields: fields, cookies: cookies, authorization: authorization, loopback: loopback) }
         // Only /agent/* takes a Bearer credential; every human route rejects Authorization.
         guard authorization == nil else { return error(cookies.isEmpty ? 401 : 403) }
-        let pairKey = Self.digest(cookies["ws-session"]).flatMap { sessions[$0]?.pair }
+        let pairKey = Self.digest(cookies["ws-session"]).flatMap { (sessions[$0] ?? endSessions[$0])?.pair }
         let sessionKey = Self.digest(cookies["ws-session"])
         if method == "POST" {
             switch path {
@@ -554,25 +800,40 @@ final class PairingSession {
                 // Only this share's link joins it (ADR 0003 rule 5): the bare entry never attaches to whatever is shared now,
                 // and an ended share's id is gone for good (410), even after a new share starts on the same port.
                 if exact([]) { return .json(403, ["status": "rejected", "reason": "share_link_required"]) }
-                guard exact(["window_id"]) || exact(["window_id", "window_generation"]) else { return error(400) }
+                guard exact(["window_id"]) || exact(["window_id", "window_generation"]) || exact(["window_id", "resume"]) || exact(["window_id", "window_generation", "resume"]) else { return error(400) }
                 guard let binding, fields["window_id"] as? String == binding.windowID else { return .json(410, ["status": "ended"]) }
                 guard active else { return error(503) }
                 guard fields["window_generation"] == nil || fields["window_generation"] as? String == binding.generation else { return error(403) }
+                let resumeKey = Self.digest(fields["resume"] as? String)
+                let resumed = resumeKey.flatMap { resumeTickets[$0] }
+                if fields["resume"] != nil && (resumed == nil || resumed?.binding != binding) { return error(403) }
+                let effectivePair = resumed?.pair ?? pairKey
                 let key: String
                 let pair: Pair
-                if let pairKey, let existing = pairs[pairKey], existing.binding == binding {
-                    key = pairKey; pair = existing
+                if let effectivePair, let existing = pairs[effectivePair], existing.binding == binding {
+                    key = effectivePair; pair = existing
                 } else {
-                    guard pairs.count < 64, let token = Self.secret(), let digest = Self.digest(token) else { return error(503) }
+                    guard !linkClaimed else { return .json(410, ["status": "consumed"]) }
+                    guard let token = Self.secret(), let digest = Self.digest(token) else { return error(503) }
                     key = digest; pair = Pair(binding: binding, deadline: now() + 8 * 3600)
                     pairs[key] = pair
                 }
-                guard let bearer = Self.secret(), let digest = Self.digest(bearer) else { return error(503) }
+                guard let bearer = Self.secret(), let digest = Self.digest(bearer),
+                      let resume = Self.secret(), let resumeDigest = Self.digest(resume) else { return error(503) }
+                if let resumeKey { resumeTickets[resumeKey] = nil }
+                if sessions.values.contains(where: { $0.pair == key }) { clearPublication(); size = [] }
                 sessions = sessions.filter { $0.value.pair != key }
                 sessions[digest] = Session(pair: key, binding: pair.binding, deadline: min(now() + 900, pair.deadline))
+                endSessions = endSessions.filter { $0.value.pair != key }
+                endSessions[digest] = sessions[digest]
+                resumeTickets = resumeTickets.filter { $0.value.pair != key }
+                resumeTickets[resumeDigest] = sessions[digest]
+                linkClaimed = true
                 var body = pair.binding.json; body["mode"] = "View"; body["role"] = "human"
                 body["principal_id"] = pair.principal; body["expires_in"] = min(900, pair.deadline - now())
                 body["tuning"] = Tuning.page
+                body["resume"] = resume
+                body["entries"] = agentEntries
                 var reply = Reply.json(200, body)
                 reply.cookies = [Self.cookie("session", bearer)]
                 return reply
@@ -590,13 +851,23 @@ final class PairingSession {
                     if let shareObserver { deferred.append { shareObserver("done", ended) } }
                 }
                 return .json(200, ["status": agentRequest!.status.rawValue])
+            case "/session/end":
+                guard exact([]) else { return error(400) }
+                guard let sessionKey, let session = endSessions[sessionKey], active,
+                      session.binding == binding, session.deadline > now() else { return error(401) }
+                endFromViewer()
+                var reply = Reply.json(200, ["status": "ended"])
+                reply.cookies = [Self.cookie("session")]
+                return reply
             case "/session/close":
                 guard exact([]) else { return error(400) }
-                guard let sessionKey, sessions.removeValue(forKey: sessionKey) != nil else { return error(401) }
+                guard let sessionKey else { return error(401) }
+                endSessions.removeValue(forKey: sessionKey)
+                guard sessions.removeValue(forKey: sessionKey) != nil else { return error(401) }
                 // 「停止观看」 is also a leave signal for this session's own viewer connections, whichever of this POST and
                 // the socket's `leave` message the host handles first.
                 for (id, connection) in connections where connection.session == sessionKey { leaveSignals[id] = "stop_watching" }
-                frame = nil; size = []
+                clearPublication(); size = []
                 var reply = Reply.json(200, ["status": "closed"]); if authorization == nil { reply.cookies = [Self.cookie("session")] }; return reply
             default:
                 guard exact([]), let sessionKey, let session = sessions[sessionKey],
@@ -619,20 +890,15 @@ final class PairingSession {
         }
         if path == base + "/meta" {
             var body = session.binding.json
-            body["available"] = frame != nil; body["size"] = size; body["dpi"] = "unknown"
+            body["available"] = publicationProof != nil; body["size"] = size; body["dpi"] = "unknown"
             body["mode"] = "View"; body["disabled_reason"] = "controls_not_enabled"
             body["server_time"] = Date().timeIntervalSince1970
             return .json(200, body)
         }
-        // `/snapshot/<seq>`: 204 until a frame newer than seq exists; HTTPServer retries it as a long poll.
+        // Synchronous callers cannot retrieve pixels. HTTP registers a future-only subscription.
         let after = path.hasPrefix(base + "/snapshot/") && Tuning.push ? UInt64(path.dropFirst(base.count + 10)) : nil
         if path == base + "/snapshot" || after != nil {
-            guard let frame, let provenance = frameProvenance, provenance.epoch == geometryEpoch else { return error(503) }
-            if after == frameSequence { return Reply(status: 204, body: Data(), type: "image/jpeg") }
-            var reply = Reply(status: 200, body: frame, type: "image/jpeg")
-            reply.headers["X-WindowShare-Geometry-Epoch"] = String(provenance.epoch)
-            reply.headers["X-WindowShare-Frame-Seq"] = String(frameSequence)
-            return reply
+            return .json(503, ["error": "frame_unavailable"])
         }
         return error(403)
     }
@@ -640,6 +906,24 @@ final class PairingSession {
     private func agentRoute(method: String, path: String, fields: [String: Any], cookies: [String: String], authorization: String?, loopback: Bool) -> Reply {
         guard loopback, cookies.isEmpty else { return .json(403, ["status": "rejected"]) }
         guard AgentFile.authorized(authorization, token: agentToken) else { return .json(401, ["status": "rejected"]) }
+        if method == "POST", path == "/agent/connect" {
+            guard fields.isEmpty else { return .json(400, ["error": "bad_request"]) }
+            guard active, let binding, cleanupHandler != nil, sessions.count < 64,
+                  let pairToken = Self.secret(), let pairKey = Self.digest(pairToken),
+                  let sessionToken = Self.secret(), let sessionKey = Self.digest(sessionToken),
+                  let ticket = Self.secret(), let ticketKey = Self.digest(ticket) else { return .json(409, ["error": "unavailable"]) }
+            let pair = Pair(binding: binding, deadline: now() + 900); pairs[pairKey] = pair
+            sessions[sessionKey] = Session(pair: pairKey, binding: binding, deadline: now() + 900, role: "agent")
+            let resource = "/w/\(binding.windowID)/events"
+            tickets[ticketKey] = Ticket(session: sessionKey, resource: resource, deadline: now() + 30)
+            return .json(200, ["ticket": ticket, "resource": resource, "window_id": binding.windowID, "window_generation": binding.generation])
+        }
+        if method == "GET", path == "/agent/snapshot" {
+            guard fields.isEmpty else { return .json(400, ["error": "bad_request"]) }
+            if let failure = agentSnapshotGate() { return failure }
+            // Synchronous callers have no independent capture transaction; HTTP uses agentSnapshot.
+            return .json(503, ["error": "frame_unavailable"])
+        }
         if method == "POST", path == "/agent/request" {
             guard Set(fields.keys) == ["reason", "timeout_sec"], let reason = fields["reason"] as? String,
                   (1...200).contains(reason.count), !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

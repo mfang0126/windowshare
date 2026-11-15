@@ -89,6 +89,14 @@ final class ControlServer {
         resultLock.lock(); let success = started; resultLock.unlock()
         guard success else { next.cancel(); throw NSError(domain: "WindowShare.Control", code: 3) }
         installCleanup()
+        identity.observeState { [weak self] in
+            self?.queue.async { [weak self] in
+                guard let self else { return }
+                for client in Array(self.clients.values) {
+                    if let context = client.context, let state = self.identity.state(context) { self.reply(state, client) }
+                }
+            }
+        }
         listener = next
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1, repeating: 1)
@@ -198,7 +206,11 @@ final class ControlServer {
     }
     private func handle(_ object: [String: Any], type: String, _ client: Client) {
         func exact(_ keys: Set<String>) -> Bool { Set(object.keys) == keys }
-        func status(_ result: String) { reply(["t": result == "ok" ? "ack" : "error", "status": result], client) }
+        func status(_ result: String) {
+            var response: [String: Any] = ["t": result == "ok" ? "ack" : "error", "status": result]
+            if result == "screenLocked" { response["message"] = "Mac 已锁屏，请先解锁" }
+            reply(response, client)
+        }
         guard let context = client.context else {
             guard exact(["t", "ticket", "resource"]), type == "auth", let ticket = object["ticket"] as? String,
                   let resource = object["resource"] as? String,
@@ -220,14 +232,25 @@ final class ControlServer {
             if let state = identity.state(context) { reply(state, client) }; return
         }
         if type == "leave" { // tells the Bot event feed this viewer left on purpose (`left`), see PairingSession.leave
-            guard exact(["t", "source"]), let source = object["source"] as? String, ["stop", "unload"].contains(source) else { status("rejected"); return }
+            guard exact(["t", "source"]), let source = object["source"] as? String, ["stop", "unload", "end"].contains(source) else { status("rejected"); return }
             identity.leave(context, source: source); return
         }
         if type == "lease.acquire" {
             guard exact(["t", "operation_id", "lease_ttl_sec"]), let operation = object["operation_id"] as? String,
                   let ttl = Self.integer(object["lease_ttl_sec"]) else { status("rejected"); return }
-            status(identity.acquire(context, operation: operation, ttl: ttl))
-            if let state = identity.state(context) { reply(state, client) }; return
+            if context.role == "agent" {
+                DispatchQueue.main.async { [self] in
+                    identity.observeSensitiveFocus(input?.sensitiveFocus() ?? true, binding: context.binding)
+                    queue.async {
+                        status(self.identity.acquire(context, operation: operation, ttl: ttl))
+                        if let state = self.identity.state(context) { self.reply(state, client) }
+                    }
+                }
+            } else {
+                status(identity.acquire(context, operation: operation, ttl: ttl))
+                if let state = identity.state(context) { reply(state, client) }
+            }
+            return
         }
         if type == "lease.release" {
             guard exact(["t", "lease_id", "lease_epoch", "decision_id"]), let id = object["lease_id"] as? String,
@@ -271,6 +294,12 @@ final class ControlServer {
         let execution = UUID()
         DispatchQueue.main.async { [self] in
             let diagnostic = InputController.Diagnostic()
+            if InputController.screenLocked() {
+                identity.cancelInput(context, id: id, epoch: epoch)
+                queue.async { client.busy = false; self.reply(["t": "error", "status": "screenLocked", "message": "Mac 已锁屏，请先解锁", "input_seq": sequence], client) }
+                return
+            }
+            let leaseWasValid = identity.hasLease(context, id: id, epoch: epoch)
             var accepted = false
             defer {
                 fputs("[input] seq=\(sequence) stage=\(diagnostic.stage.rawValue) accepted=\(accepted) posted_down=\(diagnostic.postedDown) posted_up=\(diagnostic.postedUp)\n", stderr)
@@ -286,19 +315,46 @@ final class ControlServer {
                 diagnostic.stage = .gateGeometry
                 guard identity.observeGeometry(input.measure(), source: .commitGate, binding: context.binding) == geometry else { return false }
                 diagnostic.stage = .submitAuthority
+                if context.role == "agent" {
+                    // perform and its gate execute synchronously inside the main.async above,
+                    // just like lease.acquire. Never main.sync here: that would self-deadlock.
+                    guard Thread.isMainThread else {
+                        fputs("[input] Agent gate rejected off main thread\n", stderr)
+                        return false
+                    }
+                    identity.observeSensitiveFocus(input.sensitiveFocus(), binding: context.binding)
+                }
                 return identity.submit(context, id: id, epoch: epoch, sequence: sequence, generation: generation,
                                        geometry: geometry, execution: execution, effect: effect)
             }
+            if ok && type == "click" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    guard self.identity.hasLease(context, id: id, epoch: epoch), !InputController.screenLocked() else { return }
+                    let editable = input.focusedTextEntry()
+                    self.queue.async { self.reply(["t": "focus", "editable": editable, "lease_id": id, "lease_epoch": epoch], client) }
+                }
+            }
             accepted = ok
-            if !ok { identity.cancelInput(context, id: id, epoch: epoch) }
+            let editable = ok && type == "click" && input.focusedTextEntry()
+            let revoke = !ok && Self.mustRevokeRejectedInput(postedEffects: diagnostic.postedEffects, locked: InputController.screenLocked())
+            if revoke { identity.cancelInput(context, id: id, epoch: epoch) }
             queue.async {
                 client.busy = false
                 guard self.clients[ObjectIdentifier(client.connection)] != nil else { return }
-                self.reply(["t": ok ? "ack" : "error", "status": ok ? "ok" : "rejected", "input_seq": sequence], client)
+                let status = ok ? "ok" : (InputController.screenLocked() ? "screenLocked" : (!leaseWasValid ? "leaseRevoked" : "rejected"))
+                var response: [String: Any] = ["t": ok ? "ack" : "error", "status": status, "input_seq": sequence]
+                if ok && type == "click" { response["editable"] = editable }
+                if !ok { response["retryable"] = !revoke && self.identity.hasLease(context, id: id, epoch: epoch) }
+                if status == "screenLocked" { response["message"] = "Mac 已锁屏，请先解锁" }
+                if status == "leaseRevoked" { response["message"] = "租约已撤销" }
+                self.reply(response, client)
                 if let state = self.identity.state(context) { self.reply(state, client) }
             }
         }
     }
+    /// Rejecting an untouched action does not invalidate a safe lease. Partial execution can leave held state,
+    /// so it must revoke and run cleanup; lock/geometry/authority changes retain their independent revocation.
+    static func mustRevokeRejectedInput(postedEffects: Int, locked: Bool) -> Bool { locked || postedEffects > 0 }
     private func reply(_ object: [String: Any], _ client: Client) {
         guard clients[ObjectIdentifier(client.connection)] != nil, client.sends < 8,
               JSONSerialization.isValidJSONObject(object),

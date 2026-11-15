@@ -15,6 +15,7 @@ The share-end methods are copied verbatim from MenuBarController.swift (from `st
 a harness whose UI, capture and input are inert stubs. Injected clock, temp lock dir, no listeners, capture,
 input or GUI. Usage (repo root): python3 Scripts/verify-share-ending.py [--source <repo root to test>]
 """
+
 import re, select, subprocess, sys, tempfile
 from pathlib import Path
 
@@ -191,7 +192,7 @@ def n1_race(tmp):
 }}
 ''')
     exe, state = tmp / "race", tmp / "n1"
-    build = subprocess.run(["swiftc", "-parse-as-library", str(tmp / "AgentRequest-barrier.swift"), str(tmp / "race.swift"), "-o", str(exe)],
+    build = subprocess.run(["swiftc", "-D", "WINDOWSHARE_TEST", "-parse-as-library", str(tmp / "AgentRequest-barrier.swift"), str(tmp / "race.swift"), "-o", str(exe)],
                            capture_output=True, text=True)
     if build.returncode: print(build.stderr[-4000:]); return False
     def line(proc, timeout):
@@ -238,7 +239,7 @@ with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     (tmp / "harness.swift").write_text(harness)
     exe = tmp / "verify-share-ending"
-    build = subprocess.run(["swiftc", "-parse-as-library", *[str(root / f"host/Sources/{n}.swift") for n in src],
+    build = subprocess.run(["swiftc", "-D", "WINDOWSHARE_TEST", "-parse-as-library", *[str(root / f"host/Sources/{n}.swift") for n in src],
                             str(tmp / "harness.swift"), "-o", str(exe)], capture_output=True, text=True)
     if build.returncode:
         print(build.stderr[-4000:]); print("FAILED to compile harness against", root); sys.exit(1)

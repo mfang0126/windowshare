@@ -1,4 +1,4 @@
-// Self-check: swiftc -parse-as-library -o /tmp/vpc Scripts/verify-production-capture.swift host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift && /tmp/vpc --diagnostics-self-check
+// Self-check: swiftc -D WINDOWSHARE_TEST -parse-as-library -o /tmp/vpc Scripts/verify-production-capture.swift host/Sources/{CaptureController,InputController,PairingSession,ViewerPage,EntryConfiguration,AgentRequest}.swift && /tmp/vpc --diagnostics-self-check
 // Compile with frozen CaptureController, InputController, PairingSession and ViewerPage sources.
 // Argument: frozen verify-capture-geometry executable; only its --owned-window child is captured.
 // No listeners, input injection, permission requests, saved images or production access bypass.

@@ -22,6 +22,10 @@ enum CLITarget {
             return CLI.frontToBack(windows.filter { $0.scWindow.owningApplication?.bundleIdentifier == bundle }).prefix(1).map { $0 }
         }
     }
+    var includesOffscreen: Bool {
+        if case .windowID = self { return true }
+        return false
+    }
     var label: String {
         switch self {
         case .title(let title): return "window titled \"\(title)\""
@@ -101,7 +105,7 @@ enum CLI {
         var seen = Set<pid_t>()
         let rows: [[String: Any]] = frontToBack(windows).map { w in
             ["app": w.ownerName, "bundle_id": w.scWindow.owningApplication?.bundleIdentifier ?? "", "pid": Int(w.ownerPID),
-             "window_id": Int(w.id), "title": w.title ?? "", "frontmost": seen.insert(w.ownerPID).inserted]
+             "on_screen": w.scWindow.isOnScreen, "window_id": Int(w.id), "title": w.title ?? "", "frontmost": seen.insert(w.ownerPID).inserted]
         }
         return (try? JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])) ?? Data("[]".utf8)
     }

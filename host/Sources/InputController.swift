@@ -7,20 +7,62 @@ private func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePo
 
 /// All calls are main-queue confined. No native mutation is allowed without a submission gate.
 final class InputController {
+    static func lockedSession(_ session: [String: Any]?) -> Bool {
+        guard let session else { return true }
+        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
+    }
+    static func screenLocked() -> Bool {
+        lockedSession(CGSessionCopyCurrentDictionary() as? [String: Any])
+    }
     typealias Gate = (() -> Bool) -> Bool
     final class Diagnostic {
         enum Stage: String {
             case preTarget = "pre_target", preGeometry = "pre_geometry"
             case liveTarget = "perform_live_target", eventCreate = "event_create"
             case gateDemo = "gate_demo", gateGeometry = "gate_geometry"
-            case submitAuthority = "submit_authority", hit, heldButton = "held_button"
+            case submitAuthority = "submit_authority", hit, focus, locked, heldButton = "held_button"
             case effectPosted = "effect_posted"
         }
         var stage: Stage = .preTarget
+        var postedEffects = 0
         var postedDown = 0
         var postedUp = 0
     }
     private let window: WindowInfo
+    private let poster: (CGEvent) -> Void
+    private let isLocked: () -> Bool
+    private static func postToSystem(_ event: CGEvent) {
+        #if WINDOWSHARE_TEST
+        _ = testPostGuard
+        testNativePostAttempts += 1
+        #else
+        event.post(tap: .cghidEventTap)
+        #endif
+    }
+    #if WINDOWSHARE_TEST
+    // Test hooks and the poster are main-queue confined; posters must not re-enter the session gate.
+    static var testNativePostAttempts = 0
+    private static let testPostGuard: Void = {
+        atexit {
+            if testNativePostAttempts != 0 {
+                fputs("FAIL unexpected native post attempts: \(testNativePostAttempts)\n", stderr)
+                fflush(nil)
+                _exit(1)
+            }
+        }
+    }()
+    func testTrackKey(_ code: CGKeyCode) { heldKeys.insert(code) }
+    func testTrackButton(_ button: CGMouseButton, point: CGPoint) { heldButtons[button] = point }
+    var testFrame: CGRect?
+    var testHits: [Bool] = []
+    var testFocus: [Bool] = []
+    var testFailCreateButtons: Set<CGMouseButton> = []
+    var testFailCreateMouseTypes: Set<CGEventType> = []
+    var testFailCreateKeys: Set<CGKeyCode> = []
+    private func testCanCreate(_ button: CGMouseButton, _ type: CGEventType) -> Bool {
+        !testFailCreateButtons.contains(button) || !testFailCreateMouseTypes.contains(type)
+    }
+    #endif
     private var heldButtons: [CGMouseButton: CGPoint] = [:]
     private var heldKeys: Set<CGKeyCode> = []
     private var lastPoint: CGPoint?
@@ -29,8 +71,11 @@ final class InputController {
     private var armed = false
     private let probe: Probe
 
-    init(window: WindowInfo) {
+    init(window: WindowInfo, poster: @escaping (CGEvent) -> Void = InputController.postToSystem,
+         isLocked: @escaping () -> Bool = InputController.screenLocked) {
         self.window = window
+        self.poster = poster
+        self.isLocked = isLocked
         let launchDate = NSRunningApplication(processIdentifier: window.ownerPID)?.launchDate
         probe = Probe(
             launchMatches: { launchDate != nil && NSRunningApplication(processIdentifier: window.ownerPID)?.launchDate == launchDate },
@@ -88,12 +133,18 @@ final class InputController {
         return .success(value)
     }
     func liveRect() -> CGRect? {
+        #if WINDOWSHARE_TEST
+        if let testFrame { return testFrame }
+        #endif
         guard case .success(let r) = Self.measure(id: window.id, pid: window.ownerPID, probe: probe, rectOnly: true) else { return nil }
         return CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
     }
     func measure() -> Result<[Double], PairingSession.GeometryFailure> { Self.measure(id: window.id, pid: window.ownerPID, probe: probe) }
     func geometry() -> [Double]? { try? measure().get() }
     private func hit(_ point: CGPoint) -> Bool {
+        #if WINDOWSHARE_TEST
+        if testFrame != nil { return testHits.isEmpty ? false : testHits.removeFirst() }
+        #endif
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], 0) as? [[String: Any]] else { return false }
         for item in list {
             guard (item[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0.01,
@@ -161,6 +212,9 @@ final class InputController {
         return _AXUIElementGetWindow(element, &id) == .success && id != 0 ? id : nil
     }
     private func focused() -> Bool {
+        #if WINDOWSHARE_TEST
+        if testFrame != nil { return testFocus.isEmpty ? false : testFocus.removeFirst() }
+        #endif
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == window.ownerPID,
               let target = target() else { return false }
         var value: CFTypeRef?
@@ -168,9 +222,152 @@ final class InputController {
               let value else { return false }
         return CFEqual(target, value)
     }
+    static func sensitiveFocus(role: String?, subrole: String?) -> Bool {
+        guard let role else { return true }
+        if [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) {
+            // Only explicitly understood non-secure text subroles are allowed.
+            // AXUnknown (common even for ordinary text), nil and custom subroles fail closed.
+            return subrole != kAXSearchFieldSubrole
+        }
+        return ![kAXButtonRole, kAXCheckBoxRole, kAXRadioButtonRole, kAXWindowRole, kAXScrollAreaRole, "AXWebArea", "AXLink", kAXListRole].contains(role)
+    }
+    /// Unknown accessibility state is sensitive; only role/subrole are read, never values or text.
+    func sensitiveFocus() -> Bool {
+        guard Thread.isMainThread else {
+            fputs("[input] AX focus rejected off main thread\n", stderr)
+            return true
+        }
+        #if WINDOWSHARE_TEST
+        return true
+        #else
+        guard !isLocked() else { return true }
+        var focusedWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(window.ownerPID), kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
+              let focusedWindow, CFGetTypeID(focusedWindow) == AXUIElementGetTypeID(),
+              Self.windowID(focusedWindow as! AXUIElement) == window.id else { return true }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(window.ownerPID), kAXFocusedUIElementAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return true }
+        let element = value as! AXUIElement
+        var role: CFTypeRef?, subrole: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        _ = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+        return Self.sensitiveFocus(role: role as? String, subrole: subrole as? String)
+        #endif
+    }
+    /// Metadata-only bounded AX observation. An incomplete tree is never a safe tree.
+    struct SnapshotObservation {
+        let focus: AXUIElement
+        let geometry: [Double]
+        let nodes: [CFTypeRef]
+        func matches(_ other: SnapshotObservation) -> Bool {
+            geometry == other.geometry && CFEqual(focus, other.focus) && nodes.count == other.nodes.count &&
+                zip(nodes, other.nodes).allSatisfy { CFEqual($0, $1) }
+        }
+    }
+    struct SnapshotNode {
+        let role: String
+        let subrole: String
+        let bounds: CGRect
+        let children: [CFTypeRef]
+    }
+    /// The production traversal and synthetic fixtures share these bounds and sensitivity rules.
+    static func snapshotTree(root: CFTypeRef, visible: CGRect, deadline: TimeInterval,
+                             clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                             read: (CFTypeRef, Int) -> SnapshotNode?) -> [CFTypeRef]? {
+        var stack: [(CFTypeRef, Int)] = [(root, 0)]
+        var seen: [CFTypeRef] = [], result: [CFTypeRef] = []
+        while let (element, depth) = stack.popLast() {
+            guard clock() < deadline, depth <= 16, seen.count < 256,
+                  !seen.contains(where: { CFEqual($0, element) }),
+                  let node = read(element, 256 - seen.count - stack.count - 1),
+                  !node.bounds.isNull,
+                  [node.bounds.minX, node.bounds.minY, node.bounds.width, node.bounds.height].allSatisfy({ $0.isFinite }),
+                  node.bounds.width >= 0, node.bounds.height >= 0 else { return nil }
+            if node.bounds.intersects(visible) && (node.role == kAXSecureTextFieldSubrole || node.subrole == kAXSecureTextFieldSubrole ||
+                ([kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(node.role) && sensitiveFocus(role: node.role, subrole: node.subrole))) { return nil }
+            seen.append(element)
+            guard node.children.count <= 256 - seen.count - stack.count else { return nil }
+            result.append(["element": element, "role": node.role, "subrole": node.subrole,
+                           "bounds": [node.bounds.minX, node.bounds.minY, node.bounds.width, node.bounds.height]] as CFDictionary)
+            stack.append(contentsOf: node.children.map { ($0, depth + 1) })
+        }
+        return clock() < deadline ? result : nil
+    }
+    func snapshotObservation() -> SnapshotObservation? {
+        guard Thread.isMainThread, !isLocked() else { return nil }
+        #if WINDOWSHARE_TEST
+        return nil // Tests inject observations; never touch real AX in a synthetic build.
+        #else
+        let started = ProcessInfo.processInfo.systemUptime
+        let app = AXUIElementCreateApplication(window.ownerPID)
+        guard AXUIElementSetMessagingTimeout(app, 0.05) == .success,
+              case .success(let geometry) = measure(), geometry.count == 5 else { return nil }
+        func read(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+            guard ProcessInfo.processInfo.systemUptime - started < 0.25,
+                  AXUIElementSetMessagingTimeout(element, 0.05) == .success else { return nil }
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+        guard let focusedWindow = read(app, kAXFocusedWindowAttribute),
+              CFGetTypeID(focusedWindow) == AXUIElementGetTypeID(),
+              Self.windowID(focusedWindow as! AXUIElement) == window.id,
+              let focused = read(app, kAXFocusedUIElementAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        let focus = focused as! AXUIElement
+        guard Self.windowID(focus) == window.id, let role = read(focus, kAXRoleAttribute) as? String,
+              let subrole = read(focus, kAXSubroleAttribute) as? String,
+              !Self.sensitiveFocus(role: role, subrole: subrole) else { return nil }
+        let visible = CGRect(x: geometry[0], y: geometry[1], width: geometry[2], height: geometry[3])
+        let target = focusedWindow as! AXUIElement
+        guard rect(target) == visible else { return nil }
+        guard let nodes = Self.snapshotTree(root: target, visible: visible, deadline: started + 0.25, read: { value, remaining in
+            guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            let element = value as! AXUIElement
+            guard let role = read(element, kAXRoleAttribute) as? String,
+                  let subrole = read(element, kAXSubroleAttribute) as? String,
+                  let bounds = rect(element) else { return nil }
+            var count: CFIndex = 0
+            guard AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &count) == .success,
+                  count >= 0, count <= remaining else { return nil }
+            var values: [CFTypeRef] = []
+            if count > 0 {
+                var children: CFArray?
+                guard AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, count, &children) == .success,
+                      let array = children as? [AXUIElement], array.count == count else { return nil }
+                values = array
+            }
+            return SnapshotNode(role: role, subrole: subrole, bounds: bounds, children: values)
+        }) else { return nil }
+        guard ProcessInfo.processInfo.systemUptime - started < 0.25,
+              case .success(let finalGeometry) = measure(), finalGeometry == geometry else { return nil }
+        return SnapshotObservation(focus: focus, geometry: geometry, nodes: nodes)
+        #endif
+    }
+    /// Metadata only: never read AXValue, selected text, labels or password contents.
+    func focusedTextEntry() -> Bool {
+        #if WINDOWSHARE_TEST
+        return false
+        #else
+        guard focused(), !isLocked() else { return false }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(window.ownerPID), kAXFocusedUIElementAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
+        let element = value as! AXUIElement
+        var role: CFTypeRef?, subrole: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole) == .success else { return false }
+        return [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role as? String ?? "")
+            && !Self.sensitiveFocus(role: role as? String, subrole: subrole as? String)
+        #endif
+    }
     private func mouse(_ type: CGEventType, point: CGPoint, button: CGMouseButton, count: Int = 1, diagnostic: Diagnostic?, gate: Gate) -> Bool {
         diagnostic?.stage = .eventCreate
-        guard armed, let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else { return false }
+        guard armed else { return false }
+        #if WINDOWSHARE_TEST
+        guard testCanCreate(button, type) else { return false }
+        #endif
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else { return false }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(count))
         let release = type == .leftMouseUp || type == .rightMouseUp
         var unverified = false
@@ -194,7 +391,9 @@ final class InputController {
                 diagnostic?.stage = .hit
                 guard self.hit(point) else { return false }
             }
-            event.post(tap: .cghidEventTap)
+            guard !self.isLocked() else { return false }
+            self.poster(event)
+            diagnostic?.postedEffects += 1
             diagnostic?.stage = .effectPosted
             if type == .leftMouseDown || type == .rightMouseDown { diagnostic?.postedDown += 1 }
             if type == .leftMouseUp || type == .rightMouseUp { diagnostic?.postedUp += 1 }
@@ -261,7 +460,14 @@ final class InputController {
                   let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
                                       wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0) else { return false }
             event.location = point
-            return gate { guard self.hit(point) else { return false }; event.post(tap: .cghidEventTap); return true }
+            return gate {
+                diagnostic?.stage = .hit
+                guard self.hit(point) else { return false }
+                diagnostic?.stage = .locked
+                guard !self.isLocked() else { return false }
+                self.poster(event); diagnostic?.postedEffects += 1; diagnostic?.stage = .effectPosted
+                return true
+            }
         }
         if type == "key" || type == "text" {
             let code = type == "key" ? Self.keys[object["key"] as! String]! : 0
@@ -283,8 +489,12 @@ final class InputController {
                     }
                     // Residual risk: focus can change between this check and the post; at most one event lands elsewhere.
                     guard gate({
+                        diagnostic?.stage = .focus
                         guard self.focused() else { return false }
-                        event.post(tap: .cghidEventTap)
+                        diagnostic?.stage = .locked
+                        guard !self.isLocked() else { return false }
+                        self.poster(event)
+                        diagnostic?.postedEffects += 1; diagnostic?.stage = .effectPosted
                         if step.down { self.heldKeys.insert(step.code); pressed.append(step.code) } else { self.heldKeys.remove(step.code) }
                         return true
                     }) else { return abandon() }
@@ -309,37 +519,52 @@ final class InputController {
     }
     private func restore(gate: Gate) -> Bool {
         guard let saved = savedFrame else { return true }
-        defer { savedFrame = nil; setFrame = nil }
-        guard let setFrame, liveRect() == setFrame, let element = target() else { return true }
+        guard let setFrame, liveRect() == setFrame, let element = target() else { savedFrame = nil; self.setFrame = nil; return true }
         var size = saved.size
         guard let value = AXValueCreate(.cgSize, &size) else { return false }
-        return gate {
+        let restored = gate {
             guard self.liveRect() == setFrame, let current = self.target(), CFEqual(current, element) else { return false }
             return AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, value) == .success
         }
+        if restored { savedFrame = nil; self.setFrame = nil }
+        return restored
     }
     /// Release-only, never gated: a modifier goes up as a flagsChanged with no flags (a plain key-up keeps the flag).
     private func releaseKey(_ code: CGKeyCode) -> Bool {
+        guard !self.isLocked() else { return false }
+        #if WINDOWSHARE_TEST
+        guard !testFailCreateKeys.contains(code) else { return false }
+        #endif
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return false }
-        if Self.modifierKeys.contains(where: { $0.code == code }) { event.type = .flagsChanged; event.flags = [] }
-        event.post(tap: .cghidEventTap)
+        event.flags = []
+        if Self.modifierKeys.contains(where: { $0.code == code }) { event.type = .flagsChanged }
+        guard !self.isLocked() else { return false }
+        self.poster(event)
         heldKeys.remove(code)
         return true
+    }
+    /// Run only releases for tracked downs; callbacks allow a no-injection regression test.
+    static func releaseTracked(buttons: [CGMouseButton: CGPoint], keys: Set<CGKeyCode>,
+                               releaseButton: (CGMouseButton, CGPoint) -> Bool, releaseKey: (CGKeyCode) -> Bool) -> Bool {
+        var success = true
+        for button in buttons.keys.sorted(by: { $0.rawValue < $1.rawValue }) { if !releaseButton(button, buttons[button]!) { success = false } }
+        for code in keys.sorted() { if !releaseKey(code) { success = false } }
+        return success
     }
     /// Only releases actually submitted downs; cleanup may run after authority is revoked.
     func cleanup() -> Bool {
         armed = false
-        var success = true
-        for (button, point) in heldButtons {
-            if let event = CGEvent(mouseEventSource: nil, mouseType: button == .right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: point, mouseButton: button) { event.post(tap: .cghidEventTap) }
-            else { success = false }
-        }
-        for code in heldKeys where !releaseKey(code) { success = false }
-        // Always end with a flagsChanged carrying no flags, even when nothing is tracked as held: the session flag
-        // state outlives our events (H1: Command read as held after the host exited).
-        if let reset = CGEvent(keyboardEventSource: nil, virtualKey: 55, keyDown: false) {
-            reset.type = .flagsChanged; reset.flags = []; reset.post(tap: .cghidEventTap)
-        } else { success = false }
+        guard !self.isLocked() || (heldButtons.isEmpty && heldKeys.isEmpty && savedFrame == nil) else { return false }
+        let success = Self.releaseTracked(buttons: heldButtons, keys: heldKeys, releaseButton: { button, point in
+            guard !self.isLocked() else { return false }
+            let type: CGEventType = button == .right ? .rightMouseUp : .leftMouseUp
+            #if WINDOWSHARE_TEST
+            guard self.testCanCreate(button, type) else { return false }
+            #endif
+            guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else { return false }
+            guard !self.isLocked() else { return false }
+            self.poster(event); self.heldButtons[button] = nil; return true
+        }, releaseKey: { self.releaseKey($0) })
         if success { heldButtons.removeAll(); lastPoint = nil }
         return restore(gate: { $0() }) && success
     }

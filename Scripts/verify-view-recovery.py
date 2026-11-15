@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run shipped viewer recovery with deterministic timers; no GUI or input injection."""
+
 from pathlib import Path
 import subprocess
 import tempfile
@@ -7,7 +8,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 js = (root / 'host/Sources/ViewerPage.swift').read_text().split('<script>')[1].split('</script>')[0]
 js = js.replace('  openView().catch(e=>recover(e.message));', '''
-  globalThis.test={recover,openView,clear,setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
+  globalThis.test={recover,openView,clear,textChunks,queueText,acquire,fallbackSetup(){stopped=false;failures=0;alternatives=['http://192.168.1.2:8777/'];resumeToken='test-capability';},touchStart,touchMove,touchEnd,flushTap,flushPhoneText,mobile(){return {zoom,panX,panY,pendingTap,touches:touches.size}},prime(){displayedGeometry=authority.geometry_epoch;},setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
 ''')
 harness = r'''
 const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
@@ -42,6 +43,20 @@ vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);c
  ws.onmessage({data:JSON.stringify(st)});el('interact').onclick();assert.match(el('detail').textContent,/正在申请控制权/);
  ws.onmessage({data:JSON.stringify({...st,mode:'Interact',lease_id:'L',lease_epoch:1})});
  assert.doesNotMatch(el('detail').textContent,/正在申请控制权/,'lease granted but status still says requesting');assert.match(el('detail').textContent,/已获得控制权/);
+ // Long mixed text is split within wire limits and only advances after the matching acknowledgement.
+ t.prime();const mixed='中文Ab9🙂'.repeat(100),chunks=Array.from(t.textChunks(mixed));
+ assert.equal(chunks.join(''),mixed);assert(chunks.every(x=>[...x].length<=128&&Buffer.byteLength(x)<=1024));
+ el('text').value=mixed;const start=sent.length;assert(t.queueText(mixed));
+ let typed=sent.slice(start).filter(x=>x.t==='text');assert.equal(typed.length,1);
+ ws.onmessage({data:JSON.stringify({t:'ack',input_seq:999})});assert.equal(sent.slice(start).filter(x=>x.t==='text').length,1);
+ for(let i=0;i<chunks.length;i++){
+   typed=sent.slice(start).filter(x=>x.t==='text');assert.equal(typed.length,i+1);assert.equal(typed[i].text,chunks[i]);
+   ws.onmessage({data:JSON.stringify({t:'ack',input_seq:typed[i].input_seq})});
+ }
+ assert.equal(el('text').value,'');assert.equal(sent.slice(start).filter(x=>x.t==='text').map(x=>x.text).join(''),mixed);
+ assert(t.queueText(mixed));const beforeReject=sent.filter(x=>x.t==='text').length;
+ ws.onmessage({data:JSON.stringify({t:'error',retryable:true})});
+ assert.equal(sent.filter(x=>x.t==='text').length,beforeReject);assert(t.values().lease);assert.equal(t.values().pending,null);
  // Host exit closes the socket with 1001: show 「共享已结束」 and stop retrying; any other close still recovers.
  timers.clear();ws.onclose({code:1001});assert.match(el('state').textContent,/共享已结束/,'host exit left: '+el('state').textContent);assert.doesNotMatch(el('detail').textContent,/控制权/);
  assert.equal(timers.size,0);events.online();assert.equal(timers.size,0);
@@ -58,6 +73,35 @@ vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);c
  ws=await pollFails();assert.doesNotMatch(el('state').textContent,/恢复|连接 View/);ws.onclose({code:1001});
  assert.match(el('state').textContent,/共享已结束/,'poll failure hid host end: '+el('state').textContent);assert.equal(timers.size,0);
  ws=await pollFails();const grace=[...timers.values()].find(x=>x.ms===1000);assert(grace);grace.fn();assert([...timers.values()].some(x=>x.ms===1500));
+ // Normal-page acquisition uses the same guarded request, never sends input before geometry matches.
+ ws=await join();ws.onmessage({data:JSON.stringify(st)});const beforeAcquire=sent.length;t.acquire();
+ assert.equal(sent.slice(beforeAcquire).filter(x=>x.t==='lease.acquire').length,1);assert(!sent.slice(beforeAcquire).some(x=>x.t==='click'));
+ // Phone gestures: first tap waits for granted matching geometry, pinch/pan never produce remote clicks.
+ let time=Date.now();c.Date=class extends Date{static now(){return time}};
+ const img=el('stream'),stage=el('stage');img.naturalWidth=img.clientHeight=stage.clientWidth=400;img.naturalHeight=400;
+ img.getBoundingClientRect=()=>({left:0,top:0,width:400,height:400});stage.setPointerCapture=()=>{};stage.releasePointerCapture=()=>{};
+ const pointer=(id,x,y)=>({pointerId:id,clientX:x,clientY:y,button:0,preventDefault(){}});
+ const inputStart=sent.length;t.touchStart(pointer(1,100,100));t.touchEnd(pointer(1,100,100));
+ assert(t.mobile().pendingTap);assert(!sent.slice(inputStart).some(x=>x.t==='click'));
+ ws.onmessage({data:JSON.stringify({...st,mode:'Interact',lease_id:'M',lease_epoch:2})});t.prime();time+=301;t.flushTap();
+ const click=sent.slice(inputStart).find(x=>x.t==='click');assert(click);assert.equal(click.x,.25);
+ ws.onmessage({data:JSON.stringify({t:'ack',input_seq:click.input_seq})});
+ t.touchStart(pointer(2,100,100));t.touchStart(pointer(3,200,100));t.touchMove(pointer(3,300,100));
+ assert.equal(t.mobile().zoom,2);t.touchEnd(pointer(3,300,100));t.touchEnd(pointer(2,100,100));
+ const afterPinch=sent.length;t.touchStart(pointer(4,200,200));t.touchMove(pointer(4,150,150));t.touchEnd(pointer(4,150,150));
+ assert(t.mobile().panX<0);assert.equal(sent.length,afterPinch);
+ time+=500;t.touchStart(pointer(5,100,100));t.touchEnd(pointer(5,100,100));time+=100;t.touchStart(pointer(6,100,100));t.touchEnd(pointer(6,100,100));assert.equal(t.mobile().zoom,1);
+ time+=301;t.flushTap();assert.equal(sent.length,afterPinch,'double tap zoom must not click');
+ t.touchStart(pointer(7,100,100));t.touchMove(pointer(7,100,140));t.touchEnd(pointer(7,100,140));assert.equal(sent.at(-1).t,'scroll');
+ ws.onmessage({data:JSON.stringify({t:'ack',input_seq:sent.at(-1).input_seq})});
+ el('phoneText').value='中文粘贴🙂';t.flushPhoneText();assert.equal(sent.at(-1).t,'text');assert.equal(sent.at(-1).text,'中文粘贴🙂');assert.equal(el('phoneText').value,'');
+ const beacons=[];c.Blob=Blob;c.navigator.sendBeacon=(...args)=>{beacons.push(args);return true};
+ events.pagehide();assert.equal(sent.at(-1).source,'end');assert.equal(beacons[0][0],'/session/end');
+ assert.equal(await beacons[0][1].text(),'{}');timers.clear();events.online();assert.equal(timers.size,0);
+ // A loaded page can navigate to a private alternate without ending the share or putting capability in a query.
+ let destination=null;c.location.replace=value=>destination=value;t.fallbackSetup();t.recover();t.recover();t.recover();
+ assert.equal(destination,'http://192.168.1.2:8777/w/w#resume=test-capability');
+ const beaconCount=beacons.length;events.pagehide();assert.equal(beacons.length,beaconCount);
  console.log('PASS automatic View recovery, background return, no input/lease replay, explicit stop, ended/bare link stops, lease granted note, host exit ends share, done and stop clear the lease note, poll failure does not hide host end');
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''

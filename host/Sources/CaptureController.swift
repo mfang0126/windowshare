@@ -62,12 +62,16 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private let lifecycleLock = NSLock()
     private var cancelled = false
     private var starting = false
+    private var outputPaused = false
+    private var activityDriver: CapturePauseDriver?
     private let identity: PairingSession?
     private let binding: PairingSession.Binding?
     private var targetWatcher: DispatchSourceTimer?
     private var captureSize: [Int] = []
     private var configurationSince: UInt64 = 0
     private var configurationUpdating = false
+    private var agentSnapshotBusy = false // main-thread only; remains busy until the native request finishes
+    private var privacyReader: (() -> Bool)?
     private var geometryReader: (() -> Result<[Double], PairingSession.GeometryFailure>)?
     var onInvalidated: (() -> Void)?
 
@@ -121,10 +125,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - Window listing
 
-    func listWindows() async throws -> [WindowInfo] {
-        let content = try await shareableContentWithTimeout()
+    func listWindows(includeOffscreen: Bool = false) async throws -> [WindowInfo] {
+        let content = try await shareableContentWithTimeout(includeOffscreen: includeOffscreen)
         return content.windows
-            .filter { $0.isOnScreen && $0.windowLayer == 0 }
+            .filter { Self.selectableWindow(onScreen: $0.isOnScreen, layer: $0.windowLayer, includeOffscreen: includeOffscreen) }
             .filter { ($0.title ?? "").isEmpty == false }
             .filter { $0.owningApplication?.processID != getpid() }
             .map {
@@ -140,6 +144,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             .sorted { "\($0.ownerName) \($0.title ?? "")" < "\($1.ownerName) \($1.title ?? "")" }
     }
 
+    static func selectableWindow(onScreen: Bool, layer: Int, includeOffscreen: Bool) -> Bool {
+        layer == 0 && (onScreen || includeOffscreen)
+    }
+
     @MainActor func ownedWindow(_ window: NSWindow) async throws -> WindowInfo {
         let number = window.windowNumber
         guard number > 0, window.isVisible, NSApp.window(withWindowNumber: number) === window else { throw CaptureError.windowNotFound }
@@ -150,10 +158,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
                           ownerPID: getpid(), frame: live.frame, scWindow: live)
     }
 
-    private func shareableContentWithTimeout(seconds: Int = 10) async throws -> SCShareableContent {
+    private func shareableContentWithTimeout(seconds: Int = 10, includeOffscreen: Bool = false) async throws -> SCShareableContent {
         try await withThrowingTaskGroup(of: SCShareableContent.self) { group in
             group.addTask {
-                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: !includeOffscreen)
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
@@ -170,7 +178,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - Capture
 
-    @MainActor func startCapture(_ window: WindowInfo, onFrame: @escaping (Data) -> Void) async throws {
+    @MainActor func startCapture(_ window: WindowInfo, includeOffscreen: Bool = false, onFrame: @escaping (Data) -> Void) async throws {
         guard lifecycle({
             guard stream == nil, !starting, !cancelled else { return false }
             starting = true; self.onFrame = onFrame; return true
@@ -190,8 +198,8 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CaptureError.windowNotFound
         }
         watchTarget(window, application: application, launchDate: launchDate)
-        // Re-resolve and compare the process instance before beginning this capture.
-        let content = try await shareableContentWithTimeout()
+        // Re-resolve the exact ID, including offscreen Agent targets; never activate another window.
+        let content = try await shareableContentWithTimeout(includeOffscreen: includeOffscreen)
         guard targetExists(window, application: application, launchDate: launchDate) else {
             fputs("[capture] revalidation target missing\n", stderr)
             throw CaptureError.windowNotFound
@@ -205,6 +213,9 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CaptureError.windowNotFound
         }
 
+        if !live.isOnScreen {
+            fputs("[capture] selected offscreen window by exact ID; no window activation. Minimized or non-rendering Space windows may not provide frames; show only the intended Space and reselect its verified window ID if needed.\n", stderr)
+        }
         let filter = SCContentFilter(desktopIndependentWindow: live)
         let config = SCStreamConfiguration()
         if #available(macOS 14.0, *) { config.ignoreShadowsSingleWindow = true }
@@ -213,7 +224,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         let output = Self.outputSize(points: live.frame.size, scale: 2)
         config.width = Int(output.width)
         config.height = Int(output.height)
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 15) // idle policy floor; StreamTuningPolicy later
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(Self.viewFPS)) // idle policy floor; StreamTuningPolicy later
         config.queueDepth = 3
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = true
@@ -231,6 +242,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             self.configurationSince = mach_absolute_time()
             let input = InputController(window: window)
             self.geometryReader = { input.measure() }
+            self.privacyReader = { input.sensitiveFocus() }
             self.currentWindow = WindowInfo(
                 id: live.windowID, title: live.title,
                 ownerName: live.owningApplication?.applicationName ?? "(unknown)",
@@ -242,8 +254,62 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             fputs("[capture] post-start acceptance rejected target=\(targetStillExists)\n", stderr)
             try? await stream.stopCapture(); throw CaptureError.windowNotFound
         }
+        let driver = CapturePauseDriver { paused in
+            if paused { try await stream.stopCapture() } else { try await stream.startCapture() }
+        }
+        lifecycle { activityDriver = driver }
+        if let identity {
+            identity.installAgentSnapshot { [weak self] grant, finish in
+                DispatchQueue.main.async { self?.captureAgentSnapshot(grant, finish: finish) }
+            }
+        }
         succeeded = true
         print("[capture] started")
+    }
+
+    /// Per-request SCK screenshot; never reads or writes the human stream or publication proof.
+    @MainActor private func captureAgentSnapshot(_ grant: PairingSession.AgentSnapshotGrant,
+        finish: @escaping (Result<PairingSession.AgentSnapshotFrame, PairingSession.AgentSnapshotFailure>) -> Void) {
+        guard #available(macOS 14.0, *), !agentSnapshotBusy,
+              let window = lifecycle({ !cancelled && !outputPaused && !configurationUpdating ? currentWindow : nil }),
+              binding == grant.binding, identity?.isCurrent(grant.binding) == true else { finish(.failure(.unavailable)); return }
+        let input = InputController(window: window)
+        guard let before = input.snapshotObservation(), before.geometry == grant.geometry else { finish(.failure(.sensitive)); return }
+        agentSnapshotBusy = true
+        let start = ProcessInfo.processInfo.systemUptime
+        let configuration = SCStreamConfiguration()
+        configuration.width = grant.size[0]; configuration.height = grant.size[1]
+        configuration.ignoreShadowsSingleWindow = true
+        configuration.showsCursor = false; configuration.capturesAudio = false
+        let filter = SCContentFilter(desktopIndependentWindow: window.scWindow)
+        Task { @MainActor in
+            defer { agentSnapshotBusy = false }
+            do {
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+                guard ProcessInfo.processInfo.systemUptime - start < 1.5,
+                      lifecycle({ !cancelled && !outputPaused && !configurationUpdating }),
+                      identity?.isCurrent(grant.binding) == true,
+                      image.width == grant.size[0], image.height == grant.size[1] else { finish(.failure(.unavailable)); return }
+                guard let after = input.snapshotObservation(), before.matches(after) else { finish(.failure(.sensitive)); return }
+                guard let data = JPEGEncoder.encodeImage(image) else { finish(.failure(.unavailable)); return }
+                finish(.success(.init(data: data, size: [image.width, image.height])))
+            } catch { finish(.failure(.unavailable)) }
+        }
+    }
+
+    /// Stop SCK entirely while the viewer is backgrounded or the Mac is locked; keep the selected target.
+    func setPaused(_ paused: Bool) {
+        let driver = lifecycle { () -> CapturePauseDriver? in
+            guard !cancelled else { return nil }
+            outputPaused = paused
+            if !paused { configurationSince = mach_absolute_time() }
+            return activityDriver
+        }
+        if paused, let binding { identity?.discardFrames(binding) }
+        Task {
+            do { try await driver?.setPaused(paused) }
+            catch { invalidate() }
+        }
     }
 
     /// Stream output pixels for a window of `points` at `scale`, long edge capped at 2560 by halving the scale.
@@ -291,12 +357,13 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     // Matches startCapture, so a reapply after an external resize keeps the starting resolution and rate.
     private var maxEdge: Int? // Interact cap (M2-a2), applied by the JPEG encoder
     private var lastScale: CGFloat = 2
-    private var lastFPS: Int = 15
+    static var viewFPS: Int { ProcessInfo.processInfo.environment["WINDOWSHARE_VIEW_FPS"].flatMap(Int.init).flatMap { (2...60).contains($0) ? $0 : nil } ?? 24 }
+    private var lastFPS: Int = viewFPS
 
     /// M2-a: tune the stream while a lease is held, restore it after.
     /// ponytail: a change that lands while another updateConfiguration is in flight is dropped; retry if seen.
     func setInteract(_ on: Bool) {
-        let fps = on && Tuning.fps ? 60 : 15
+        let fps = on && Tuning.fps ? 60 : Self.viewFPS
         let small = on && Tuning.small
         let scale: CGFloat = small ? 1 : 2
         let quality = on && Tuning.q4 ? 0.4 : small ? 0.5 : 0.65
@@ -386,8 +453,13 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             return old
         }
         frameWatcher?.cancel(); frameWatcher = nil
-        do { try await old?.stopCapture() }
-        catch { if let binding { identity?.revokeWindow(binding) }; fputs("[capture] stop failed\n", stderr) }
+        let driver = lifecycle { () -> CapturePauseDriver? in let value = activityDriver; activityDriver = nil; return value }
+        do { if let driver { try await driver.finish() } else { try await old?.stopCapture() } }
+        catch {
+            // A failed pause transition must not skip the final best-effort native stop.
+            try? await old?.stopCapture()
+            if let binding { identity?.revokeWindow(binding) }; fputs("[capture] stop failed\n", stderr)
+        }
         print("[capture] stopped")
     }
 
@@ -396,7 +468,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
         let callback = lifecycle { () -> ((Data) -> Void)? in
-            guard self.stream === stream, !cancelled else { return nil }; return onFrame
+            guard self.stream === stream, !cancelled, !outputPaused else { return nil }; return onFrame
         }
         guard let callback else { recordSampleOutcome(.inactive); return }
         guard sampleBuffer.isValid else { recordSampleOutcome(.invalidSample); return }
@@ -436,14 +508,16 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         let ready = lifecycle {
-            !cancelled && !configurationUpdating && self.stream === stream &&
+            !cancelled && !outputPaused && !configurationUpdating && self.stream === stream &&
                 captureSize == size && time >= configurationSince
         }
         guard ready else { recordSampleOutcome(.configuration); return }
         guard let identity, let binding else { recordSampleOutcome(.authority); return }
         // This only rejects disagreement; live geometry never supplies a sample's provenance.
-        let reader = lifecycle { geometryReader }
-        let reading = DispatchQueue.main.sync { reader?() } ?? .failure(PairingSession.GeometryFailure(check: .noReader))
+        let (reader, privacy) = lifecycle { (geometryReader, privacyReader) }
+        let (measurement, sensitive) = DispatchQueue.main.sync { (reader?(), privacy?() ?? true) }
+        identity.observeSensitiveFocus(sensitive, binding: binding)
+        let reading = measurement ?? .failure(PairingSession.GeometryFailure(check: .noReader))
         let live = try? reading.get()
         guard identity.observeGeometry(reading, source: .capture, binding: binding) != nil else {
             recordSampleOutcome(live == nil ? .geometryUnavailable : .authority); return
@@ -456,7 +530,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let data = JPEGEncoder.encode(pb, crop: crop, quality: jpegQuality, maxEdge: edge) {
             lifecycle {
-                guard !cancelled, !configurationUpdating, self.stream === stream,
+                guard !cancelled, !outputPaused, !configurationUpdating, self.stream === stream,
                       time >= configurationSince, captureSize == size else { recordSampleOutcome(.configuration); return }
                 identity.publish(data, size: publishedSize, binding: binding, provenance: provenance)
                 // publish is void and may reject a concurrent authority/epoch change.
@@ -464,7 +538,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             frameLock.lock(); frameCount += 1; frameLock.unlock()
             callback(data)
-        } else { recordSampleOutcome(.encoding) }
+        } else { identity.discardFrames(binding); recordSampleOutcome(.encoding) }
     }
 
     // MARK: - SCStreamDelegate
@@ -519,6 +593,9 @@ enum JPEGEncoder {
         var cgImage: CGImage?
         guard VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage) == noErr,
               let image = cgImage?.cropping(to: crop) else { return nil }
+        return encodeImage(image, quality: quality, maxEdge: maxEdge)
+    }
+    static func encodeImage(_ image: CGImage, quality: Double = 0.65, maxEdge: Int? = nil) -> Data? {
         let data = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationSetProperties(dest, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
@@ -526,5 +603,30 @@ enum JPEGEncoder {
         CGImageDestinationAddImage(dest, image, maxEdge.map { [kCGImageDestinationImageMaxPixelSize: $0] as CFDictionary })
         guard CGImageDestinationFinalize(dest) else { return nil }
         return data as Data
+    }
+}
+
+/// Serializes asynchronous SCK stop/start transitions, including teardown during a pending resume.
+actor CapturePauseDriver {
+    private let transition: (Bool) async throws -> Void
+    private var desired = false, paused = false, busy = false, ended = false
+    private var failure: Error?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    init(transition: @escaping (Bool) async throws -> Void) { self.transition = transition }
+    func setPaused(_ value: Bool) async throws {
+        desired = ended || value
+        if busy { return }
+        if let failure { throw failure }
+        busy = true
+        defer { busy = false; let pending = waiters; waiters = []; pending.forEach { $0.resume() } }
+        do {
+            while paused != desired { let next = desired; try await transition(next); paused = next }
+        } catch { failure = error; throw error }
+    }
+    func finish() async throws {
+        ended = true
+        try await setPaused(true)
+        if busy { await withCheckedContinuation { waiters.append($0) } }
+        if let failure { throw failure }
     }
 }

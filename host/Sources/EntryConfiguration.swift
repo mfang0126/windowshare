@@ -90,6 +90,50 @@ struct EntryConfiguration {
         let lan = allowLAN ? Self.localAddresses().filter(Self.isPrivate).sorted() : []
         return (Self.tailscaleAddress().map { [$0] } ?? []) .map { "http://\($0):\(port)/" } + lan.map { "http://\($0):\(port)/" }
     }
+    /// Host-side listener reachability only; this cannot establish a remote phone's route.
+    static func orderedReachable(_ entries: [String], preference: String = "tailscale", probe: (String) -> Bool) -> [String] {
+        let sorted = entries.enumerated().sorted { a, b in
+            func rank(_ entry: String) -> Int {
+                let ts = isTailscale(URL(string: entry)?.host ?? "")
+                return (preference == "lan" ? !ts : ts) ? 0 : 1
+            }
+            return (rank(a.element), a.offset) < (rank(b.element), b.offset)
+        }.map(\.element)
+        return sorted.filter(probe)
+    }
+    static func entryPreference(defaults: UserDefaults = UserDefaults(suiteName: "com.windowshare.network")!) -> String {
+        defaults.string(forKey: "entryPreference") == "lan" ? "lan" : "tailscale"
+    }
+    static func saveEntryPreference(_ preference: String, defaults: UserDefaults = UserDefaults(suiteName: "com.windowshare.network")!) {
+        guard ["tailscale", "lan"].contains(preference) else { return }
+        defaults.set(preference, forKey: "entryPreference")
+    }
+    func reachableEntries() -> [String] {
+        Self.orderedReachable(entries(), preference: Self.entryPreference(), probe: Self.probeEntry)
+    }
+    private static func probeEntry(_ entry: String) -> Bool {
+        guard let url = URL(string: entry), let host = url.host, let port = url.port,
+              url.scheme == "http", isTailscale(host) || isPrivate(host) else { return false }
+        // Probe both listeners, without creating a viewer or consuming the one-use link.
+        for servicePort in [port, port + 1] {
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else { return false }
+            defer { Darwin.close(fd) }
+            _ = fcntl(fd, F_SETFL, O_NONBLOCK)
+            var address = sockaddr_in(); address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET); address.sin_port = UInt16(servicePort).bigEndian
+            guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else { return false }
+            let result = withUnsafePointer(to: &address) { ptr in ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            } }
+            if result != 0 && errno != EINPROGRESS { return false }
+            var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            guard poll(&descriptor, 1, 750) > 0 else { return false }
+            var error: Int32 = 0; var length = socklen_t(MemoryLayout<Int32>.size)
+            guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0, error == 0 else { return false }
+        }
+        return true
+    }
     /// Loopback peer only, regardless of LAN mode (agent routes).
     static func isLoopback(_ endpoint: NWEndpoint?) -> Bool {
         guard case let .hostPort(host, _)? = endpoint else { return false }

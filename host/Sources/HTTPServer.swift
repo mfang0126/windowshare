@@ -18,6 +18,7 @@ final class HTTPServer {
         var controlOrigin = ""
         var streamID: UUID?
         var sequence: UInt64 = 0
+        var snapshotID: UUID?
         var sendingSince: TimeInterval?
         var timer: DispatchSourceTimer?
         var agentWaiting = false
@@ -80,6 +81,7 @@ final class HTTPServer {
         guard clients.removeValue(forKey: ObjectIdentifier(client.conn)) != nil else { return }
         client.timer?.cancel(); client.timer = nil
         if let id = client.streamID { identity.closeStream(id) }
+        if let id = client.snapshotID { identity.finishSnapshot(id) }
         client.conn.cancel()
     }
     private func reject(_ client: Client, _ status: Int = 400) {
@@ -176,8 +178,24 @@ final class HTTPServer {
                 // Detect disconnects even when the capture has no new frames.
                 client.conn.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, _, _ in self?.close(client) }
             }
-        } else if method == "GET", headers["authorization"] == nil, path.contains("/snapshot/") {
-            longPoll(client, path: path, cookies: cookies, until: ProcessInfo.processInfo.systemUptime + 2)
+        } else if method == "GET", headers["authorization"] == nil, (path.contains("/snapshot/") || path.hasSuffix("/snapshot")) {
+            client.answered = true; client.data.removeAll()
+            client.snapshotID = identity.waitSnapshot(path: path, cookies: cookies, cancel: { client.conn.cancel() }) { reply in
+                // Callback runs under authority, not necessarily on the HTTP queue. Only NW send here.
+                var payload = Data(self.responseHeader(reply, controlOrigin: client.controlOrigin).utf8)
+                payload.append(reply.body)
+                client.conn.send(content: payload, completion: .contentProcessed { [weak self] _ in self?.close(client) })
+            }
+            queue.asyncAfter(deadline: .now() + 2) { [weak self, weak client] in
+                if let id = client?.snapshotID { self?.identity.finishSnapshot(id) }
+            }
+        } else if method == "GET", isAgent, path == "/agent/snapshot" {
+            client.answered = true; client.data.removeAll()
+            identity.agentSnapshot(authorization: headers["authorization"], cookies: cookies, loopback: true) { reply in
+                var payload = Data(self.responseHeader(reply, controlOrigin: client.controlOrigin).utf8)
+                payload.append(reply.body)
+                client.conn.send(content: payload, completion: .contentProcessed { [weak self] _ in self?.close(client) })
+            }
         } else if method == "GET", isAgent, path.hasPrefix("/agent/events/") {
             // Agent event long poll: held up to 3 s (under the 5 s idle close), re-checked every 50 ms. At most 4 at once
             // so a looping agent cannot take the 32 connection slots from phones.
@@ -239,11 +257,17 @@ final class HTTPServer {
             if ProcessInfo.processInfo.systemUptime - start >= 5 { close(client) }
             return
         }
-        identity.sendFrame(id, after: client.sequence) { frame, sequence in
+        // Waiting is bounded too; completion rearms only after this publication has drained.
+        client.sendingSince = ProcessInfo.processInfo.systemUptime
+        identity.sendFrame(id, after: client.sequence) { [weak self, weak client] frame, _ in
+            guard let self, let client else { return }
             var part = Data("--windowshare\r\nContent-Type: image/jpeg\r\nContent-Length: \(frame.count)\r\n\r\n".utf8)
             part.append(frame); part.append(Data("\r\n".utf8))
-            client.sequence = sequence
-            submit(client, part)
+            client.conn.send(content: part, completion: .contentProcessed { [weak self, weak client] error in
+                guard let self, let client, self.clients[ObjectIdentifier(client.conn)] != nil else { return }
+                if error != nil { self.close(client); return }
+                client.sendingSince = nil
+            })
         }
     }
 }

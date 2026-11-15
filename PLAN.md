@@ -2,7 +2,54 @@
 
 做什么见 `INTENT.md`。本文件只记里程碑顺序、每步做什么、怎么算做完、当前状态。一次只做一步；做完在「状态」里写一句结果，和代码放在同一个 commit。
 
-**当前：v1.0.0 已发布**（M1 + M2 + M4 完成；M2-b、M2-c 不做；后续新想法先记进本文件）
+**当前：PR #5 第八轮，按已确定的密码画面分离方案实施；不合并或发布。** 依据 [2026-11-15 产品要求](docs/product/share-page-ux-20261115.md)，先整理文档，再实现零控件分享、手机触控与输入、地址选择、Agent 离屏窗口路径及后台资源暂停，修复长文本和滚动拒绝。帧率暂不调整或测试；只提交 PR 分支，不合并或发布。
+
+## 第八轮实施记录
+
+1. 人类传输改为未来 publish 订阅：PairingSession 不保留 JPEG；每个 stream 仅一个待发送订阅，完成发送后再订阅；snapshot 等下一帧，2 秒无帧明确 503。网络发送受 32 客户端、16 MiB 单帧及 5 秒连接时限约束，不补发历史帧。`swift build --package-path host` exit 0（无捕获）；合成订阅用例在第 5 块补齐。
+
+2. 输入依据独立 `PublicationProof`（无像素，仅来源 binding/generation、geometry、epoch、displayTime、size、sequence）；编码成功且 publish 校验通过才生成。撤权、断开、重连、锁屏、几何变化、清理和编码失败清证明并推进时间围栏，旧 sample 不能复活。`swift build --package-path host` exit 0；撤权/编码失败合成用例在第 5 块补齐。
+
+3. Agent snapshot 独立使用按请求 SCScreenshotManager：认证/lease/owner/epoch/lock/cleanup 与发布证明前后复核，主线程前后完整 AX 元数据观察（焦点、几何和树一致）；可见敏感文本、未知读取、超时、循环、深度/节点超限一律拒绝。仅编码并提交单个响应，无缓存；原生请求未结束时不启动第二个。`swift build --package-path host` exit 0；合成验证在第 5 块。
+
+4. `/session/close` 无条件删除该 cookie 的 endSessions，即使普通 session 已失效；生产 AX/gate 主线程要求改为固定诊断并拒绝，不崩溃 host。已知限制：焦点判断到 CGEvent/HID 输入仍非原子，主线程执行不能阻止其他进程在两者之间改变焦点。验证待全量回归。
+
+## 第七轮密码画面阻塞（2026-11-15，未完成，待拍板）
+
+协调端本轮明确采用临时收紧：认证后的 `/agent/snapshot` 一律返回 `503 frame_safety_unproven`，不读取/返回共享 JPEG；其余 Agent 输入、人类路径及所有帧/几何门禁保持原状。这不是完整密码策略实现，也不是密码安全验收。verify-agent-path.py exit 0：安全/敏感/恢复焦点的认证快照均 503 无像素，错误/缺失凭据 401，click/text 仍经原门禁返回，无真实捕获或输入。
+
+- **现在是什么样**：SCK sample → 主线程读 AX/实时几何 → crop/编码 → `publish`。像素 sample 的 displayTime 早于 AX 观察，两者非原子；即使焦点是按钮或安全搜索框，窗口其他区域仍可能显示密码/验证码。`frameSensitive` 只是一秒内焦点启发式，不是整帧安全证明。人类 stream/snapshot 与 `submit` 的 frame-non-nil 检查仍共用 `PairingSession.frame`；关闭 Agent 出口没有消除人类/门禁缓存，现状仍不满足硬要求。
+- **要改成什么样（候选，未实现）**：人类实时帧按已授权订阅者直接发送，只在编码/有界 in-flight 网络发送中短暂持有，不保留 latest-frame，不支持历史回读；断开、撤权、锁屏、几何变化时丢弃待发内容。long-poll 在下一个获准 publish 时完成，不读取缓存。把授权证明独立成不含 Data 的记录，保留 binding、generation、geometry、epoch、displayTime、size、frameSequence，并且只在原有 sample/crop/配置/发布校验全部通过及编码成功后生成；门禁对证明检查必须与原 frame 存在条件等价，所有旧清空点也清证明。不得用单独 AX 几何观察冒充已发布帧。
+- **卡在哪**：当前 HTTP stream 定时拉 latest-frame、snapshot 重试与 submit 的 frame 条件耦合，需要一次有界发送/订阅生命周期改造；还需明确“发送中短暂内存”的可接受边界和证明产生时机，验证慢客户端、撤权、重连、旧 epoch、编码失败均不复活证明。Agent 重新开放还必须有独立且可证明整帧无敏感内容的来源（目前没有），不能以连续两次 AX 安全、超时或复制同一 JPEG 作为证明。
+- **恢复条件**：上述传输/证明分离与所有门禁等价回归通过，可信非敏感像素来源经确认，独立审查后才重新开放 Agent 快照。普通文本与无注入测试不能替代密码安全验收；不靠放宽门禁解阻塞。
+
+2026-11-15 第七轮第 3 块：/session/close 同步删除 endSessions，已关闭 cookie 的 /session/end 返回 401 且不结束共享。verify-agent-events.py exit 0；旧测试以关闭 cookie 反复重连，现区分可恢复 transport leave 与显式 close，close 后新建共享再继续独立事件案例（无真实网络外连/输入）。
+
+2026-11-15 第七轮第 2 块：核实输入执行及同步 gate 已在 main.async 内；在 Agent gate 和真实 AX 读取入口加主线程断言，不嵌套 main.sync。verify-agent-path.py exit 0：真实 HTTP/WS 驱动 acquire、click、分段 text，替身每次焦点读取断言主线程，各 CLI 15 秒超时保护，全部返回无死锁；无真实 AX/HID。
+
+2026-11-15 第七轮第 1 块：文本角色仅显式 AXSearchField 子角色视为非敏感，nil、AXUnknown、secure、自定义/空子角色默认拒绝；自动键盘复用相同分类。verify-input-poster.py exit 0（recording poster，无真实输入）；普通字段若仅暴露 AXUnknown 也交给人，不为兼容放宽。
+
+2026-11-15 第六轮续做第 0 块：长文本按 128 字符/1024 字节分段并等待逐段确认；零副作用拒绝保留租约，部分执行或锁屏仍撤权。输入录制、Viewer 分段/恢复、真实 loopback WebSocket 锁屏回归及 Swift build 通过；无真实 HID 或真机验收。
+
+2026-11-15 第六轮续做 A：正常分享隐藏全部控件，`#debug` 保留诊断界面；点画面经原安全门申请租约，断线自动恢复观看；关页经 WebSocket 或认证 beacon 发 left/page_closed 并结束共享（刷新同样结束，浏览器未发送信号时仍只能判断连）。Node Viewer、事件与 Swift build 验证，无真机验收。
+
+2026-11-15 DeepSeek 离屏复审修正：捕获重查默认仅屏上，只有精确 window-id CLI 传入离屏许可；纯文本列表补 on_screen。离屏选择单测与 Swift build 通过，真实离屏出帧仍未测。
+
+2026-11-15 第六轮 B 密码门禁冲突（协调端 msg_676b10acaff8）：密码输入新要求未实现。当前实时传输、快照及输入授权共用 PairingSession 内存 frame；禁止密码画面进入门禁缓存，又不放宽 frame/provenance 检查时，无法直接实现。下一步需先分离仅传输的人类实时帧与非敏感授权证明；不能把密码帧快照留下过门禁，也不能将本轮普通文本测试算作密码验收。普通自动键盘只对可确认的非 secure AX 文本字段启用，未知/secure 不自动打开；旧 debug 输入与缓存路径尚未完成密码策略改造。
+
+2026-11-15 第六轮续做 B（密码策略除外）：正常页铺满宽度，单点在匹配几何/租约到位后点击，双指/双击缩放，放大拖动平移、未放大拖动滚动；AX 非 secure 文本焦点触发隐藏手机输入桥，composition/粘贴按确认顺序发送，visualViewport 避让键盘。链接仅首次无凭证兑换，同一浏览器凭证可重连；成功输入刷新 300 秒空闲期限，保留原会话/配对硬上限与全部门禁。mobile-authority、Node 手势/恢复、input-poster、lock-response、agent-events 和 Swift build 通过；手机键盘/中文/双指真实行为未测，不能算真机完成。
+
+2026-11-15 第六轮续做 C：发链接前探测私有地址两个监听端口，默认 Tailscale、失败回落 LAN；--prefer-network lan/tailscale 在独立 UserDefaults suite 保存偏好。已认证页连续失败后携一次性恢复凭据跨地址重连，不把内部导航当关页；首次不可达无法回落的限制已写入需求。地址排序/偏好持久化、恢复凭据不可重放、Viewer 回落不结束共享及 Swift build 通过；真实跨网/手机回落未测。
+
+2026-11-15 第六轮后台 CPU：锁屏或最后一个查看连接离开后暂停 SCStream，清空授权帧；恢复连接/解锁后重启同一捕获目标，异步暂停/恢复/关闭串行化，不改帧率。capture-pause 无注入回归与 Swift build 通过。只读检查 Mac 为 LOCKED，按卡未做 CPU 前后测量、未操作窗口或解锁；实际节省待未锁时测。
+
+2026-11-15 第六轮续做 D：新增本机 Agent connect/snapshot 与 windowshare-agent 客户端，单帧、点击、stdin 中文分段输入均使用同一受限租约；密码或未知 AX 焦点拒绝 Agent 帧/输入，登录交人并等待 page_closed。真实 loopback HTTP/WebSocket + inert poster 跑通客户端三类操作和关页等待；无明文输入日志。密码实时帧/门禁缓存分离仍未实现，后台 Ego AX 与真实出帧未验，不把本轮标为完整真机闭环。
+
+历史：v1.0.0 已发布（M1 + M2 + M4 完成；M2-b、M2-c 不做）。
+
+2026-11-15 第六轮第 2 项：CLI `list --include-offscreen --json` 返回离屏窗口及 `on_screen`，`--window-id` 可选离屏目标；菜单仍只列屏上窗口。无激活或窗口切换。`verify-offscreen-selection.swift` 与 Swift build 通过，Ego 离屏真实出帧未测。
+
+2026-11-15 PR #5 锁屏与清理修复：无注入回归覆盖定时撤权、通知、重试、恢复、事件投递及旧租约拒绝；设备验证未执行。
 
 ## M1 核心闭环：一条命令共享，Tailscale 上的手机能操作
 
@@ -110,3 +157,7 @@ Bot 事件通道（2026-11-14，draft PR，未合并；方向待 Ming 拍板，I
 - 开启进程退出后 host 立即退出，手机页面停在「连接 View」空白画面，不显示「共享已结束」（「完成」结束时会显示）。2026-11-13 真机见到。
 - 手机拿到控制权、点击已生效后，状态行仍显示「正在申请控制权；最多 5 分钟」。2026-11-13 真机见到。
 - Dock 自动隐藏时，贴屏幕边缘的点击可能落到滑出的 Dock 上（`InputController.swift` 中 `occludes` 的 ponytail 注释）。
+
+2026-11-15 矩阵首轮修复：增加共享与控制事件、锁屏拦截和提示、空清理不发事件，View 默认 24 fps。无注入自动验证见本次报告；锁屏期间采集帧率及真机回归待测。
+
+2026-11-15 矩阵复审修复：无注入回归覆盖锁屏输入与清理、失败退避和事件；持续失败保留 busy 并提示重启。锁屏真机及手机验证留待后续回归。

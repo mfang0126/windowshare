@@ -8,6 +8,7 @@ booleans and counts, the share is revoked at once (fail-closed, nothing retried)
 token or coordinate. It also checks that the three production call sites pass their own caller name.
 Usage (repo root): python3 Scripts/verify-geometry-diagnostics.py [--source <repo root to test>]
 """
+
 from pathlib import Path
 import subprocess, sys, tempfile
 
@@ -129,7 +130,7 @@ with tempfile.TemporaryDirectory(prefix='verify-geometry-diag-') as tmp:
     tmp = Path(tmp)
     (tmp / 'main.swift').write_text(HARNESS)
     files = [str(src / f'{n}.swift') for n in ['CaptureController', 'InputController', 'PairingSession', 'ViewerPage', 'EntryConfiguration', 'AgentRequest']]
-    build = subprocess.run(['swiftc', *files, str(tmp / 'main.swift'), '-o', str(tmp / 'check')], capture_output=True, text=True)
+    build = subprocess.run(['swiftc', '-D', 'WINDOWSHARE_TEST', *files, str(tmp / 'main.swift'), '-o', str(tmp / 'check')], capture_output=True, text=True)
     if build.returncode:
         failures.append('harness does not compile against this source (no Probe / measure / sourced observeGeometry): ' + build.stderr.strip().splitlines()[0][:300])
     else:

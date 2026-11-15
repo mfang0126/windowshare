@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Local Agent client: restricted lease input, single frames, or explicit human handoff. Never log credentials or text."""
+import argparse, json, os, sys, time, uuid, urllib.request, urllib.error
+from pathlib import Path
+
+def main():
+ p=argparse.ArgumentParser(description=__doc__)
+ sub=p.add_subparsers(dest='command',required=True)
+ sub.add_parser('frame')
+ click=sub.add_parser('click');click.add_argument('x',type=float);click.add_argument('y',type=float)
+ sub.add_parser('text',help='Read text from stdin, never command-line arguments')
+ handoff=sub.add_parser('handoff');handoff.add_argument('--reason',default='请完成登录后关闭分享页');handoff.add_argument('--timeout',type=int,default=300)
+ a=p.parse_args()
+ config=json.loads(Path(os.environ.get('WINDOWSHARE_AGENT_JSON',Path.home()/'Library/Application Support/WindowShare/agent.json')).read_text())
+ port=int(config['port']);token=config['token'];base=f'http://127.0.0.1:{port}'
+ opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+ def call(path,body=None):
+  data=None if body is None else json.dumps(body).encode()
+  request=urllib.request.Request(base+path,data=data,headers={'Authorization':'Bearer '+token,**({'Content-Type':'application/json'} if data is not None else {})})
+  try:
+   with opener.open(request,timeout=8) as response: return response.status,response.read()
+  except urllib.error.HTTPError as error: return error.code,error.read()
+ def js(path,body=None):
+  status,data=call(path,body)
+  return status,json.loads(data or b'{}')
+ def human_required():
+  _,status=js('/agent/status');print(json.dumps({'status':'handoff_required','reason':'password_focused_or_unknown','entry':status.get('entry')},ensure_ascii=False));return 3
+ if a.command=='handoff':
+  _,feed=js('/agent/events/0');cursor=feed.get('next',0)
+  code,request=js('/agent/request',{'reason':a.reason,'timeout_sec':a.timeout})
+  if code!=201: raise RuntimeError('handoff unavailable')
+  print(json.dumps({'status':'waiting_for_page_close','entry':request['entry']},ensure_ascii=False),flush=True)
+  deadline=time.monotonic()+a.timeout
+  while time.monotonic()<deadline:
+   code,feed=js(f'/agent/events/{cursor}')
+   if code==204: continue
+   if code!=200: raise RuntimeError('event channel unavailable')
+   cursor=feed.get('next',cursor)
+   for event in feed.get('events',[]):
+    if event.get('request_id')!=request['id']: continue
+    if event.get('kind')=='left' and event.get('reason')=='page_closed':
+     print('{"status":"page_closed","task_success":null}');return 0
+    if event.get('kind') in ('timeout','cancelled','done'):
+     print(json.dumps({'status':event['kind'],'task_success':None}));return 4
+  print('{"status":"timeout","task_success":null}');return 4
+ try: import websocket
+ except ImportError: raise RuntimeError('websocket-client is required') from None
+ code,ticket=js('/agent/connect',{})
+ if code!=200: raise RuntimeError('agent connection unavailable')
+ ws=websocket.create_connection(f'ws://127.0.0.1:{port+1}'+ticket['resource'],origin=f'http://127.0.0.1:{port}',timeout=8)
+ def send(message): ws.send(json.dumps(message))
+ def receive(kinds):
+  for _ in range(50):
+   message=json.loads(ws.recv())
+   if message.get('t')=='heartbeat': send({'t':'pong','nonce':message['nonce']});continue
+   if message.get('t') in kinds:return message
+  raise RuntimeError('missing acknowledgement')
+ try:
+  send({'t':'auth','ticket':ticket['ticket'],'resource':ticket['resource']});state=receive({'state'})
+  # A resumed capture needs a fresh focus classification; never revive or replay input.
+  time.sleep(.2)
+  send({'t':'lease.acquire','operation_id':str(uuid.uuid4()),'lease_ttl_sec':300})
+  acquired=receive({'ack','error'})
+  if acquired.get('status')=='password_focused': return human_required()
+  if acquired.get('status')!='ok': raise RuntimeError('lease unavailable')
+  state=receive({'state'})
+  if a.command=='frame':
+   code,data=call('/agent/snapshot')
+   if code==423:return human_required()
+   if code!=200:raise RuntimeError('frame unavailable')
+   sys.stdout.buffer.write(data);return 0
+  if a.command=='click':
+   if not (0<=a.x<=1 and 0<=a.y<=1):raise RuntimeError('coordinates must be normalized')
+   inputs=[{'t':'click','x':a.x,'y':a.y,'button':'left','count':1}]
+  else:
+   text=sys.stdin.read(65537)
+   if not text or len(text)>65536:raise RuntimeError('text length outside limit')
+   inputs=[{'t':'text','text':text[i:i+128]} for i in range(0,len(text),128)]
+  for seq,payload in enumerate(inputs,1):
+   send({**payload,'lease_id':state['lease_id'],'lease_epoch':state['lease_epoch'],'input_seq':seq,'window_generation':ticket['window_generation'],'geometry_epoch':state['geometry_epoch']})
+   result=receive({'ack','error'})
+   if result.get('t')!='ack' or result.get('input_seq')!=seq:raise RuntimeError('input rejected or unconfirmed; not replayed')
+  print('{"status":"acknowledged"}');return 0
+ finally: ws.close()
+
+if __name__=='__main__':
+ try: sys.exit(main())
+ except Exception:
+  # Do not echo exception messages: network libraries may include headers or payloads.
+  print('WindowShare Agent operation failed; no input was replayed',file=sys.stderr);sys.exit(2)
