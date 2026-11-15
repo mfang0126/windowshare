@@ -54,6 +54,8 @@ func expect(_ want: [String], _ what: String, line: Int = #line) {
     let got = kinds(drain())
     precondition(got == want, "line \(line) \(what): got \(got) want \(want)")
 }
+var viewerCookies: [String: String] = [:]
+var viewerBinding = ""
 var alive: [PairingSession.Context] = [] // viewers that answer heartbeats (a live phone page)
 func tick(_ seconds: Double) { // the 1 s expiry tick, deterministically
     let end = clock + seconds
@@ -64,10 +66,11 @@ func tick(_ seconds: Double) { // the 1 s expiry tick, deterministically
 }
 func viewer(keep: Bool = false) -> (cookies: [String: String], context: PairingSession.Context) {
     if !keep { for c in alive { identity.disconnect(c) } } // one phone page at a time unless asked
-    let r = phone("POST", "/session", ["window_id": binding.windowID])
+    if viewerBinding != binding.windowID { viewerCookies = [:]; viewerBinding = binding.windowID }
+    let r = phone("POST", "/session", ["window_id": binding.windowID], viewerCookies)
     precondition(r.status == 200)
     let kv = r.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
-    let cookies = [kv[0]: kv[1]]
+    let cookies = [kv[0]: kv[1]]; viewerCookies = cookies
     let t = json(phone("POST", "/w/\(binding.windowID)/connect", [:], cookies))
     let context = identity.authenticate(ticket: t["ticket"] as! String, resource: t["resource"] as! String, cancel: {})!
     alive = keep ? alive + [context] : [context]
@@ -195,28 +198,18 @@ v = viewer(); identity.disconnect(v.context); alive = []; tick(2)
 rB = request(1800); tick(45); list = drain()
 precondition(kinds(list) == ["disconnected:connection_lost/connection_closed"] && list[0]["request_id"] is NSNull, "no request at loss: \(list)")
 
-// Several viewers: only the last one to go decides.
-var first = viewer(), second = viewer(keep: true); _ = drain()
-leave(first, "stop")
-tick(50); expect([], "another viewer is still connected")
-identity.disconnect(second.context); alive = []
-tick(46); expect(["disconnected:connection_lost/connection_closed"], "last viewer dropped silently")
-first = viewer(); second = viewer(keep: true); _ = drain()
-identity.disconnect(second.context); alive = [first.context]; tick(5)
-leave(first, "stop")
-tick(46); expect(["left:stop_watching"], "last viewer said it left")
-// A session that never connected cannot relabel another viewer's silent drop (it has no connection to leave from).
+// A second unauthenticated browser cannot redeem the consumed link or influence presence.
 v = viewer(); _ = drain(); identity.disconnect(v.context); alive = []; tick(5)
-let other = phone("POST", "/session", ["window_id": binding.windowID])
-let okv = other.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
-precondition(phone("POST", "/session/close", [:], [okv[0]: okv[1]]).status == 200)
-tick(41); expect(["disconnected:connection_lost/connection_closed"], "unconnected close does not turn a drop into left")
+precondition(phone("POST", "/session", ["window_id": binding.windowID]).status == 410)
+precondition(phone("POST", "/session/close").status == 401)
+tick(41); expect(["disconnected:connection_lost/connection_closed"], "rejected browser cannot relabel a disconnect")
 _ = rA; _ = rB
 
 // A page that closes without ever connecting a viewer records nothing.
 binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
 let lone = phone("POST", "/session", ["window_id": binding.windowID])
 let kv = lone.cookies[0].components(separatedBy: ";")[0].components(separatedBy: "=")
+viewerCookies = [kv[0]:kv[1]]; viewerBinding = binding.windowID
 precondition(phone("POST", "/session/close", [:], [kv[0]: kv[1]]).status == 200)
 tick(60); expect([], "closed without a viewer connection")
 rB = request(1800)
@@ -274,11 +267,14 @@ let http = HTTPServer(identity: identity); try! http.start(configuration: config
 identity.configureAgent(token: String(repeating: "ab", count: 32), entry: "http://localhost:\(port)/")
 let binding = identity.selectWindow(); precondition(identity.activate(binding))
 DispatchQueue.global().async {
-    while readLine() != nil { // one fresh viewer (session + ticket) per line
+    var cookies: [String: String] = [:]
+    while readLine() != nil { // same redeemed browser resumes with its cookie
         var r = PairingSession.Reply(status: 0, body: Data())
-        identity.respond(method: "POST", path: "/session", fields: ["window_id": binding.windowID], cookies: [:]) { r = $0 }
+        identity.respond(method: "POST", path: "/session", fields: ["window_id": binding.windowID], cookies: cookies) { r = $0 }
+        precondition(r.status == 200)
         let cookie = String(r.cookies[0].split(separator: ";")[0].dropFirst("ws-session=".count))
-        identity.respond(method: "POST", path: "/w/\(binding.windowID)/connect", fields: [:], cookies: ["ws-session": cookie]) { r = $0 }
+        cookies = ["ws-session": cookie]
+        identity.respond(method: "POST", path: "/w/\(binding.windowID)/connect", fields: [:], cookies: cookies) { r = $0 }
         print(String(decoding: r.body, as: UTF8.self)); fflush(stdout)
     }
 }
@@ -289,7 +285,9 @@ def ws_viewer(proc, cport, hport):
     import base64, struct
     proc.stdin.write('next\n'); proc.stdin.flush()
     line = proc.stdout.readline()
-    while not line.startswith('{'): line = proc.stdout.readline()  # skip the listeners' ready lines
+    while not line.startswith('{'):
+        assert line, 'fixture exited before producing a ticket'
+        line = proc.stdout.readline()  # skip the listeners' ready lines
     ticket = json.loads(line)
     s = socket.create_connection(('127.0.0.1', cport), timeout=5)
     s.sendall((f'GET {ticket["resource"]} HTTP/1.1\r\nHost: localhost:{cport}\r\nOrigin: http://localhost:{hport}\r\nUpgrade: websocket\r\n'

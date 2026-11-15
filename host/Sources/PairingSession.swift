@@ -59,7 +59,7 @@ final class PairingSession {
         var pongAt: TimeInterval; var nonce: String?; var pingAt: TimeInterval
     }
     private struct Lease {
-        let id: String; let epoch: Int; let owner: Context; let deadline: TimeInterval
+        let id: String; let epoch: Int; let owner: Context; var deadline: TimeInterval
         let operation: String; let ttl: Int
         var sequence = 0
         var execution: UUID?
@@ -106,11 +106,12 @@ final class PairingSession {
     private let screenLocked: () -> Bool
     private var binding: Binding?
     private var active = false
+    private var linkClaimed = false
     private var frame: Data?
     private var size: [Int] = []
     private var pairs: [String: Pair] = [:]
     private var sessions: [String: Session] = [:]
-    // Close-only authority survives transport suspension; never accepted for frames, tickets or input.
+    // Close/reconnect authority survives transport suspension; never directly accepted for frames, tickets or input.
     private var endSessions: [String: Session] = [:]
     private var expiryTimer: DispatchSourceTimer?
     private var unlockObserver: NSObjectProtocol?
@@ -219,7 +220,7 @@ final class PairingSession {
         finishRequest(.cancelled, "share_ended")
         if binding != nil { emit("share_ended", "\(reason)") }
         viewerSeen = false; viewerGoneAt = nil; leaveReason = nil // the share is over: no left / disconnected for it
-        active = false // revoke before clearing output and credentials
+        active = false; linkClaimed = false // revoke before clearing output and credentials
         binding = nil; frame = nil; size = []
         shareDeadline = nil
         geometry = nil; geometryEpoch += 1; frameProvenance = nil; geometrySince = mach_absolute_time()
@@ -390,7 +391,7 @@ final class PairingSession {
             sessions[connection.session] = nil
             deferred.append(connection.cancel)
         }
-        for key in Array(pairs.keys) where !sessions.values.contains(where: { $0.pair == key }) {
+        for key in Array(pairs.keys) where !sessions.values.contains(where: { $0.pair == key }) && !endSessions.values.contains(where: { $0.pair == key }) {
             pairs[key] = nil
         }
         if let lease, lease.deadline <= now() || !current(lease.owner) || !controlAllowed(lease.owner) { revokeLease("expiredOrNotAllowed") }
@@ -597,7 +598,13 @@ final class PairingSession {
             if screenLocked() { revokeLease("screenLocked"); return false }
             if !controlAllowed(context) { revokeLease("controlNotAllowed"); return false }
             value.sequence = sequence; value.execution = execution; lease = value
-            return effect()
+            let accepted = effect()
+            if accepted, let connection = connections[context.connectionID], let session = sessions[connection.session],
+               let pair = pairs[session.pair] {
+                value.deadline = min(now() + 300, session.deadline, pair.deadline)
+                lease = value
+            }
+            return accepted
         }
     }
 
@@ -612,7 +619,7 @@ final class PairingSession {
         if path.hasPrefix("/agent/") { return agentRoute(method: method, path: path, fields: fields, cookies: cookies, authorization: authorization, loopback: loopback) }
         // Only /agent/* takes a Bearer credential; every human route rejects Authorization.
         guard authorization == nil else { return error(cookies.isEmpty ? 401 : 403) }
-        let pairKey = Self.digest(cookies["ws-session"]).flatMap { sessions[$0]?.pair }
+        let pairKey = Self.digest(cookies["ws-session"]).flatMap { (sessions[$0] ?? endSessions[$0])?.pair }
         let sessionKey = Self.digest(cookies["ws-session"])
         if method == "POST" {
             switch path {
@@ -629,7 +636,8 @@ final class PairingSession {
                 if let pairKey, let existing = pairs[pairKey], existing.binding == binding {
                     key = pairKey; pair = existing
                 } else {
-                    guard pairs.count < 64, let token = Self.secret(), let digest = Self.digest(token) else { return error(503) }
+                    guard !linkClaimed else { return .json(410, ["status": "consumed"]) }
+                    guard let token = Self.secret(), let digest = Self.digest(token) else { return error(503) }
                     key = digest; pair = Pair(binding: binding, deadline: now() + 8 * 3600)
                     pairs[key] = pair
                 }
@@ -638,6 +646,7 @@ final class PairingSession {
                 sessions[digest] = Session(pair: key, binding: pair.binding, deadline: min(now() + 900, pair.deadline))
                 endSessions = endSessions.filter { $0.value.pair != key }
                 endSessions[digest] = sessions[digest]
+                linkClaimed = true
                 var body = pair.binding.json; body["mode"] = "View"; body["role"] = "human"
                 body["principal_id"] = pair.principal; body["expires_in"] = min(900, pair.deadline - now())
                 body["tuning"] = Tuning.page

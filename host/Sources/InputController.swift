@@ -222,6 +222,23 @@ final class InputController {
               let value else { return false }
         return CFEqual(target, value)
     }
+    /// Metadata only: never read AXValue, selected text, labels or password contents.
+    func focusedTextEntry() -> Bool {
+        #if WINDOWSHARE_TEST
+        return false
+        #else
+        guard focused(), !isLocked() else { return false }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(window.ownerPID), kAXFocusedUIElementAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
+        let element = value as! AXUIElement
+        var role: CFTypeRef?, subrole: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole) == .success,
+              subrole as? String != "AXSecureTextField" else { return false }
+        return [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role as? String ?? "")
+        #endif
+    }
     private func mouse(_ type: CGEventType, point: CGPoint, button: CGMouseButton, count: Int = 1, diagnostic: Diagnostic?, gate: Gate) -> Bool {
         diagnostic?.stage = .eventCreate
         guard armed else { return false }

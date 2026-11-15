@@ -8,7 +8,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 js = (root / 'host/Sources/ViewerPage.swift').read_text().split('<script>')[1].split('</script>')[0]
 js = js.replace('  openView().catch(e=>recover(e.message));', '''
-  globalThis.test={recover,openView,clear,textChunks,queueText,acquire,prime(){displayedGeometry=authority.geometry_epoch;},setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
+  globalThis.test={recover,openView,clear,textChunks,queueText,acquire,touchStart,touchMove,touchEnd,flushTap,flushPhoneText,mobile(){return {zoom,panX,panY,pendingTap,touches:touches.size}},prime(){displayedGeometry=authority.geometry_epoch;},setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
 ''')
 harness = r'''
 const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
@@ -76,6 +76,25 @@ vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);c
  // Normal-page acquisition uses the same guarded request, never sends input before geometry matches.
  ws=await join();ws.onmessage({data:JSON.stringify(st)});const beforeAcquire=sent.length;t.acquire();
  assert.equal(sent.slice(beforeAcquire).filter(x=>x.t==='lease.acquire').length,1);assert(!sent.slice(beforeAcquire).some(x=>x.t==='click'));
+ // Phone gestures: first tap waits for granted matching geometry, pinch/pan never produce remote clicks.
+ let time=Date.now();c.Date=class extends Date{static now(){return time}};
+ const img=el('stream'),stage=el('stage');img.naturalWidth=img.clientHeight=stage.clientWidth=400;img.naturalHeight=400;
+ img.getBoundingClientRect=()=>({left:0,top:0,width:400,height:400});stage.setPointerCapture=()=>{};stage.releasePointerCapture=()=>{};
+ const pointer=(id,x,y)=>({pointerId:id,clientX:x,clientY:y,button:0,preventDefault(){}});
+ const inputStart=sent.length;t.touchStart(pointer(1,100,100));t.touchEnd(pointer(1,100,100));
+ assert(t.mobile().pendingTap);assert(!sent.slice(inputStart).some(x=>x.t==='click'));
+ ws.onmessage({data:JSON.stringify({...st,mode:'Interact',lease_id:'M',lease_epoch:2})});t.prime();time+=301;t.flushTap();
+ const click=sent.slice(inputStart).find(x=>x.t==='click');assert(click);assert.equal(click.x,.25);
+ ws.onmessage({data:JSON.stringify({t:'ack',input_seq:click.input_seq})});
+ t.touchStart(pointer(2,100,100));t.touchStart(pointer(3,200,100));t.touchMove(pointer(3,300,100));
+ assert.equal(t.mobile().zoom,2);t.touchEnd(pointer(3,300,100));t.touchEnd(pointer(2,100,100));
+ const afterPinch=sent.length;t.touchStart(pointer(4,200,200));t.touchMove(pointer(4,150,150));t.touchEnd(pointer(4,150,150));
+ assert(t.mobile().panX<0);assert.equal(sent.length,afterPinch);
+ time+=500;t.touchStart(pointer(5,100,100));t.touchEnd(pointer(5,100,100));time+=100;t.touchStart(pointer(6,100,100));t.touchEnd(pointer(6,100,100));assert.equal(t.mobile().zoom,1);
+ time+=301;t.flushTap();assert.equal(sent.length,afterPinch,'double tap zoom must not click');
+ t.touchStart(pointer(7,100,100));t.touchMove(pointer(7,100,140));t.touchEnd(pointer(7,100,140));assert.equal(sent.at(-1).t,'scroll');
+ ws.onmessage({data:JSON.stringify({t:'ack',input_seq:sent.at(-1).input_seq})});
+ el('phoneText').value='中文粘贴🙂';t.flushPhoneText();assert.equal(sent.at(-1).t,'text');assert.equal(sent.at(-1).text,'中文粘贴🙂');assert.equal(el('phoneText').value,'');
  const beacons=[];c.Blob=Blob;c.navigator.sendBeacon=(...args)=>{beacons.push(args);return true};
  events.pagehide();assert.equal(sent.at(-1).source,'end');assert.equal(beacons[0][0],'/session/end');
  assert.equal(await beacons[0][1].text(),'{}');timers.clear();events.online();assert.equal(timers.size,0);

@@ -10,6 +10,10 @@
 
 2026-11-15 DeepSeek 离屏复审修正：捕获重查默认仅屏上，只有精确 window-id CLI 传入离屏许可；纯文本列表补 on_screen。离屏选择单测与 Swift build 通过，真实离屏出帧仍未测。
 
+2026-11-15 第六轮 B 密码门禁冲突（协调端 msg_676b10acaff8）：密码输入新要求未实现。当前实时传输、快照及输入授权共用 PairingSession 内存 frame；禁止密码画面进入门禁缓存，又不放宽 frame/provenance 检查时，无法直接实现。下一步需先分离仅传输的人类实时帧与非敏感授权证明；不能把密码帧快照留下过门禁，也不能将本轮普通文本测试算作密码验收。普通自动键盘只对可确认的非 secure AX 文本字段启用，未知/secure 不自动打开；旧 debug 输入与缓存路径尚未完成密码策略改造。
+
+2026-11-15 第六轮续做 B（密码策略除外）：正常页铺满宽度，单点在匹配几何/租约到位后点击，双指/双击缩放，放大拖动平移、未放大拖动滚动；AX 非 secure 文本焦点触发隐藏手机输入桥，composition/粘贴按确认顺序发送，visualViewport 避让键盘。链接仅首次无凭证兑换，同一浏览器凭证可重连；成功输入刷新 300 秒空闲期限，保留原会话/配对硬上限与全部门禁。mobile-authority、Node 手势/恢复、input-poster、lock-response、agent-events 和 Swift build 通过；手机键盘/中文/双指真实行为未测，不能算真机完成。
+
 历史：v1.0.0 已发布（M1 + M2 + M4 完成；M2-b、M2-c 不做）。
 
 2026-11-15 第六轮第 2 项：CLI `list --include-offscreen --json` 返回离屏窗口及 `on_screen`，`--window-id` 可选离屏目标；菜单仍只列屏上窗口。无激活或窗口切换。`verify-offscreen-selection.swift` 与 Swift build 通过，Ego 离屏真实出帧未测。

@@ -307,7 +307,15 @@ final class ControlServer {
                 return identity.submit(context, id: id, epoch: epoch, sequence: sequence, generation: generation,
                                        geometry: geometry, execution: execution, effect: effect)
             }
+            if ok && type == "click" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    guard self.identity.hasLease(context, id: id, epoch: epoch), !InputController.screenLocked() else { return }
+                    let editable = input.focusedTextEntry()
+                    self.queue.async { self.reply(["t": "focus", "editable": editable, "lease_id": id, "lease_epoch": epoch], client) }
+                }
+            }
             accepted = ok
+            let editable = ok && type == "click" && input.focusedTextEntry()
             let revoke = !ok && Self.mustRevokeRejectedInput(postedEffects: diagnostic.postedEffects, locked: InputController.screenLocked())
             if revoke { identity.cancelInput(context, id: id, epoch: epoch) }
             queue.async {
@@ -315,6 +323,7 @@ final class ControlServer {
                 guard self.clients[ObjectIdentifier(client.connection)] != nil else { return }
                 let status = ok ? "ok" : (InputController.screenLocked() ? "screenLocked" : (!leaseWasValid ? "leaseRevoked" : "rejected"))
                 var response: [String: Any] = ["t": ok ? "ack" : "error", "status": status, "input_seq": sequence]
+                if ok && type == "click" { response["editable"] = editable }
                 if !ok { response["retryable"] = !revoke && self.identity.hasLease(context, id: id, epoch: epoch) }
                 if status == "screenLocked" { response["message"] = "Mac 已锁屏，请先解锁" }
                 if status == "leaseRevoked" { response["message"] = "租约已撤销" }

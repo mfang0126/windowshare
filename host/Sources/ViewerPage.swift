@@ -16,7 +16,7 @@ button,input,textarea,select{font:inherit;border:1px solid #526278;border-radius
 .actions{margin-top:8px}label{display:block}input,textarea{max-width:100%;width:360px}textarea{min-height:80px}
 main{flex:1;display:flex;align-items:center;justify-content:center;padding:8px}#stage{position:relative;max-width:100%;line-height:0}img{display:block;max-width:100%;max-height:65dvh;object-fit:contain}#stage.active{touch-action:none}#cursor{position:absolute;pointer-events:none;line-height:1;color:white;text-shadow:0 1px 3px black}[hidden]{display:none!important}
 body:not(.debug)>header,body:not(.debug)>section,body:not(.debug)>#nowin{display:none}
-body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{width:100%}body:not(.debug) img{width:100%;max-height:none}
+body:not(.debug) main{padding:0;align-items:flex-start;overflow:hidden}body:not(.debug) #stage{touch-action:none;overflow:hidden;min-height:100dvh}body:not(.debug) img{transform-origin:0 0}#phoneText{position:fixed;opacity:0;width:1px;min-height:1px;height:1px;padding:0;border:0;bottom:0;left:0}body:not(.debug) #stage{width:100%}body:not(.debug) img{width:100%;max-height:none}
 #reconnect{position:fixed;right:8px;bottom:8px;font-size:12px;color:#aebccd;background:#0e1218b0;padding:3px 6px;z-index:2}
 </style></head><body>
 <header><h1>WindowShare</h1><span id="state" role="status" aria-live="polite">连接中</span></header>
@@ -28,6 +28,7 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
 <div class="actions"><button data-key="enter">Enter</button><button data-key="tab">Tab</button><button data-key="escape">Esc</button><button data-key="backspace">⌫</button><button data-key="left">←</button><button data-key="right">→</button><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="a">A</button><button data-key="c">C</button><button data-key="v">V</button></div></div></section>
 <section id="reqcard" hidden><strong id="reqreason"></strong><p id="reqleft"></p><div class="actions"><button id="reqdone">完成</button><button id="reqcancel">取消</button></div><p id="reqerr" role="alert"></p></section>
 <p id="nowin" hidden role="status">无共享窗口：请在 Mac 菜单栏选择窗口</p>
+<textarea id="phoneText" aria-label="远程输入" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false" tabindex="-1"></textarea>
 <span id="reconnect" hidden role="status">重连中</span>
 <main><div id="stage"><img id="stream" alt="共享窗口画面" draggable="false" hidden><span id="cursor" hidden aria-hidden="true">↖</span></div></main>
 <script>
@@ -45,6 +46,7 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
   let displayedGeometry=null, frameURL=null, snapshotTimer=null, snapshotBusy=false, frameVersion=0;
   let pointer=null, longTimer=null, dragging=false, cur={x:.5,y:.5}, composing=false;
   let authenticated=false, tuning={}, frameSeq=0;
+  let pendingTap=null, zoom=1, panX=0, panY=0, pinch=null, lastTap=null, phoneComposing=false;const touches=new Map();
   const RECONNECT='画面重连中…';
   const newID=()=>{const bytes=crypto.getRandomValues(new Uint8Array(16));bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;const h=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);};
   const mods=new Set(), base=()=>'/w/'+binding.window_id;
@@ -52,7 +54,7 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
   const note=message=>{el('detail').textContent=message;};
   function raw(message){if(socket?.readyState!==WebSocket.OPEN)return false;socket.send(JSON.stringify(message));return true;}
   function resetGesture(){clearTimeout(longTimer);longTimer=null;const old=pointer;pointer=null;if(old&&stage.hasPointerCapture(old.id))stage.releasePointerCapture(old.id);dragging=false;latest=null;finalUp=null;}
-  function resetInput(){resetGesture();pending=null;textQueue=[];sentText=null;mods.clear();composing=false;document.querySelectorAll('[data-mod]').forEach(b=>b.setAttribute('aria-pressed','false'));}
+  function resetInput(){resetGesture();pendingTap=null;touches.clear();pinch=null;phoneComposing=false;el('phoneText').value='';pending=null;textQueue=[];sentText=null;mods.clear();composing=false;document.querySelectorAll('[data-mod]').forEach(b=>b.setAttribute('aria-pressed','false'));}
   function ready(){return !!(controlsEnabled&&wanted&&lease&&displayedGeometry===authority?.geometry_epoch&&socket?.readyState===WebSocket.OPEN);}
   function render(){
     const active=ready();stage.classList.toggle('active',active);
@@ -112,7 +114,7 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
       if(version!==epoch||fv!==frameVersion||!wanted||authority.geometry_epoch!==geometry){URL.revokeObjectURL(url);return;}
       // Only the actual displayed image load establishes its geometry; MJPEG never does.
       // Same-epoch refresh preserves the displayed mapping while the replacement decodes.
-      image.onload=()=>{if(version!==epoch||fv!==frameVersion||image.src!==url)return;displayedGeometry=geometry;if(el('detail').textContent===RECONNECT)note('画面已恢复。');render();latFrame();};
+      image.onload=()=>{if(version!==epoch||fv!==frameVersion||image.src!==url)return;displayedGeometry=geometry;if(el('detail').textContent===RECONNECT)note('画面已恢复。');render();latFrame();flushTap();};
       image.onerror=()=>{if(version===epoch)leave('画面载入失败；已返回 View');};
       const old=frameURL;frameURL=url;image.src=url;image.hidden=false;if(old)URL.revokeObjectURL(old);again=true;
     }catch(e){if(version===epoch&&fv===frameVersion){displayedGeometry=null;note(['TypeError','TimeoutError','AbortError'].includes(e.name)?RECONNECT:e.message);render();}}
@@ -156,7 +158,7 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
     }
     if(m.mode==='Interact'&&wanted){
       if(old&&(old.lease_epoch!==m.lease_epoch||old.lease_id!==m.lease_id||old.geometry_epoch!==m.geometry_epoch)){leave('控制权或几何已改变，请重新开启');return;}
-      lease=m;if(!old){note('已获得控制权；最多 5 分钟，不自动续期。');seq=0;resetInput();frameVersion++;image.onload=image.onerror=null;image.removeAttribute('src');displayedGeometry=null;frameSeq=0;snapshot();}
+      lease=m;if(!old){note('已获得控制权；5 分钟无操作后收回控制权。');seq=0;frameVersion++;image.onload=image.onerror=null;image.removeAttribute('src');displayedGeometry=null;frameSeq=0;snapshot();}
     }else{
       lease=null;
       if(old){wanted=false;resetInput();stream();note(m.screen_locked?'Mac 已锁屏，请先解锁':'控制权已结束；不会自动恢复。');}
@@ -178,12 +180,15 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
       ws.onmessage=event=>{
         if(version!==epoch||socket!==ws)return;
         let m;try{m=JSON.parse(event.data);}catch{clear('控制协议错误');return;}
+        if(m.t==='focus'){if(!debug&&ready()&&m.lease_id===lease.lease_id&&m.lease_epoch===lease.lease_epoch&&m.editable===true){el('phoneText').focus({preventScroll:true});avoidKeyboard();}return;}
         if(m.t==='heartbeat'){if(!document.hidden)raw({t:'pong',nonce:m.nonce});return;}
         if(m.t==='state'){el('reconnect').hidden=true;state(m);if(!authenticated&&authority){authenticated=true;note('正在观看；需要操作时开启 Interact。');}return;}
         if(m.t==='ack'||m.t==='error'){
           if(m.t==='error'&&m.retryable===true){pending=null;sentText=null;textQueue=[];latest=finalUp=null;note('这次操作未执行；控制权保留，请确认目标窗口后再操作。');render();return;}
           if(m.t==='error'){leave(m.status==='screenLocked'?'Mac 已锁屏，请先解锁':'控制已停止；操作可能部分执行，请查看窗口结果，不要重复提交。');return;}
           if(m.input_seq!==undefined&&pending===m.input_seq){if(sentText!==null&&el('text').value.startsWith(sentText))el('text').value=el('text').value.slice(sentText.length);sentText=null;pending=null;const next=finalUp||latest;finalUp=latest=null;if(next)input(next);else pumpText();render();if(tuning.input&&!snapshotBusy&&wanted&&lease){clearTimeout(snapshotTimer);snapshot();}}
+          if(!debug&&m.t==='ack'&&m.editable===true){el('phoneText').focus({preventScroll:true});avoidKeyboard();}
+          if(!debug&&!pending&&!textQueue.length)flushPhoneText();
           raw({t:'state'});
         }
       };
@@ -224,10 +229,64 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
     setTimeout(()=>{if(version===epoch&&lease?.lease_id===sentLease&&pending===sentSeq)recover('操作结果未确认；自动恢复观看，不重发操作');},5000+(payload.t==='text'?40*[...payload.text].length:0));
     render();return true;
   }
+  function flushTap(){
+    if(!pendingTap||!ready()||Date.now()<pendingTap.notBefore)return;const tap=pendingTap;pendingTap=null;
+    if(tap.geometry===authority.geometry_epoch&&Date.now()-tap.at<3000)input({t:'click',x:tap.x,y:tap.y,button:'left',count:1});
+  }
+  function transform(){
+    const width=stage.clientWidth||1,height=image.clientHeight||1;
+    panX=Math.max(width-width*zoom,Math.min(0,panX));
+    panY=Math.max(Math.min(0,(window.visualViewport?.height||window.innerHeight||height)-height*zoom),Math.min(0,panY));
+    image.style.transform=`translate(${panX}px,${panY}px) scale(${zoom})`;
+  }
+  function avoidKeyboard(){
+    const view=window.visualViewport;if(!view||debug)return;
+    stage.style.minHeight=view.height+'px';
+    if(lastTap){const y=lastTap.y*image.clientHeight*zoom+panY;if(y>view.height-48)panY-=y-(view.height-48);}
+    transform();
+  }
+  function touchStart(e){
+    if(e.button!==0)return;const p=point(e);if(!p)return;e.preventDefault();
+    // Start the authority request before recording this gesture: its reset cannot erase the new pointer.
+    if(!wanted)acquire();
+    touches.set(e.pointerId,{x:e.clientX,y:e.clientY,startX:e.clientX,startY:e.clientY,p,at:Date.now(),moved:0,geometry:authority?.geometry_epoch});
+    stage.setPointerCapture(e.pointerId);
+    if(touches.size===2){const [a,b]=[...touches.values()];pinch={distance:Math.hypot(a.x-b.x,a.y-b.y),zoom};pendingTap=null;for(const t of touches.values())t.moved=Infinity;}
+  }
+  function touchMove(e){
+    const t=touches.get(e.pointerId);if(!t)return;e.preventDefault();
+    const dx=e.clientX-t.x,dy=e.clientY-t.y;t.x=e.clientX;t.y=e.clientY;t.moved=Math.max(t.moved,Math.hypot(t.x-t.startX,t.y-t.startY));
+    if(touches.size===2&&pinch){const [a,b]=[...touches.values()];if(pinch.distance>0)zoom=Math.max(1,Math.min(4,pinch.zoom*Math.hypot(a.x-b.x,a.y-b.y)/pinch.distance));transform();return;}
+    if(zoom>1){panX+=dx;panY+=dy;transform();return;}
+    if(t.moved>6&&ready()&&!pending)input({t:'scroll',dx:Math.max(-4096,Math.min(4096,dx)),dy:Math.max(-4096,Math.min(4096,dy))});
+  }
+  function touchEnd(e){
+    const t=touches.get(e.pointerId);if(!t)return;touches.delete(e.pointerId);
+    if(stage.hasPointerCapture(e.pointerId))stage.releasePointerCapture(e.pointerId);
+    if(pinch){pinch=null;return;}if(t.moved>=6||Date.now()-t.at>500)return;
+    const p=point(e)||(!ready()?t.p:null);if(!p)return;
+    if(lastTap&&Date.now()-lastTap.at<300&&Math.hypot(e.clientX-lastTap.clientX,e.clientY-lastTap.clientY)<30){
+      zoom=zoom>1?1:2;panX=zoom===1?0:-p.x*stage.clientWidth;panY=zoom===1?0:-p.y*image.clientHeight;pendingTap=null;lastTap=null;transform();return;
+    }
+    lastTap={...p,at:Date.now(),clientX:e.clientX,clientY:e.clientY};
+    pendingTap={...p,at:Date.now(),notBefore:Date.now()+300,geometry:t.geometry};setTimeout(flushTap,300);
+  }
+  function flushPhoneText(){
+    const field=el('phoneText');if(phoneComposing||!field.value||!ready()||pending||textQueue.length)return;
+    if(queueText(field.value))field.value='';
+  }
+  el('phoneText').addEventListener('compositionstart',()=>phoneComposing=true);
+  el('phoneText').addEventListener('compositionend',()=>{phoneComposing=false;flushPhoneText();});
+  el('phoneText').addEventListener('input',flushPhoneText);
+  el('phoneText').addEventListener('keydown',e=>{
+    if(e.isComposing||phoneComposing)return;
+    if(e.key==='Backspace'&&!el('phoneText').value){e.preventDefault();input({t:'key',key:'backspace',mods:[]});}
+    if(e.key==='Enter'){e.preventDefault();input({t:'key',key:'enter',mods:[]});}
+  });
   function point(e){const r=image.getBoundingClientRect();if(!r.width||!r.height||!image.naturalWidth)return null;const scale=Math.min(r.width/image.naturalWidth,r.height/image.naturalHeight),w=image.naturalWidth*scale,h=image.naturalHeight*scale;const x=(e.clientX-r.left-(r.width-w)/2)/w,y=(e.clientY-r.top-(r.height-h)/2)/h;return Number.isFinite(x)&&Number.isFinite(y)&&x>=0&&x<=1&&y>=0&&y<=1?{x,y}:null;}
   function drawCursor(){el('cursor').style.left=(cur.x*100)+'%';el('cursor').style.top=(cur.y*100)+'%';}
   stage.addEventListener('pointerdown',e=>{
-    if(!debug&&!ready()&&e.button===0&&point(e)){e.preventDefault();acquire();return;}
+    if(!debug){touchStart(e);return;}
     if(!ready()||pending||e.button!==0)return;
     if(pointer){leave('多指手势已取消；请重新开启 Interact');return;}
     const p=point(e);if(!p)return;e.preventDefault();
@@ -236,6 +295,7 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
     if(el('mode').value!=='scroll')longTimer=setTimeout(()=>{if(pointer&&ready()&&!pending){dragging=input({t:'down',...cur});}},350);drawCursor();
   });
   stage.addEventListener('pointermove',e=>{
+    if(!debug){touchMove(e);return;}
     if(!pointer||pointer.id!==e.pointerId||!ready())return;
     const p=point(e);if(!p){leave('指针离开窗口，手势已取消');return;}
     pointer.moved=Math.max(pointer.moved,Math.hypot(e.clientX-pointer.startX,e.clientY-pointer.startY));
@@ -252,6 +312,7 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
     if(dragging)input({t:'drag',...cur});else if(el('mode').value==='mouse')input({t:'move',...cur});
   });
   stage.addEventListener('pointerup',e=>{
+    if(!debug){touchEnd(e);return;}
     if(!pointer||pointer.id!==e.pointerId)return;
     const rec=pointer, wasDragging=dragging;clearTimeout(longTimer);pointer=null;dragging=false;
     if(stage.hasPointerCapture(e.pointerId))stage.releasePointerCapture(e.pointerId);
@@ -259,12 +320,12 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
     if(el('mode').value==='scroll')return;
     if(wasDragging)input({t:'up',...cur});else if(rec.moved<10&&Date.now()-rec.time<350&&(!lat||(lat.t0=performance.now(),lat.from=lat.lum,1)))input({t:'click',...cur,button:'left',count:1});
   });
-  stage.addEventListener('pointercancel',()=>{if(pointer)leave('手势已取消；请重新开启 Interact');});
+  stage.addEventListener('pointercancel',()=>{touches.clear();pinch=null;pendingTap=null;if(pointer)leave('手势已取消；请重新开启 Interact');});
   stage.addEventListener('lostpointercapture',()=>{if(pointer)leave('手势中断；请重新开启 Interact');});
   stage.addEventListener('contextmenu',e=>{if(!ready())return;e.preventDefault();const p=point(e);if(p)input({t:'click',...(el('mode').value==='mouse'?cur:p),button:'right',count:1});});
   stage.addEventListener('wheel',e=>{if(!ready()||!point(e))return;e.preventDefault();const scale=e.deltaMode===1?16:e.deltaMode===2?image.clientHeight:1;input({t:'scroll',dx:Math.max(-4096,Math.min(4096,-e.deltaX*scale)),dy:Math.max(-4096,Math.min(4096,-e.deltaY*scale))});},{passive:false});
   el('mode').onchange=()=>{if(wanted)leave('模式已切换，请重新开启 Interact');};
-  function acquire(){if(!controlsEnabled||!authority||authority.busy||wanted)return;wanted=true;resetInput();raw({t:'lease.acquire',operation_id:newID(),lease_ttl_sec:300});render();note('正在申请控制权；最多 5 分钟，不自动续期。');}
+  function acquire(){if(!controlsEnabled||!authority||authority.busy||wanted)return;wanted=true;resetInput();raw({t:'lease.acquire',operation_id:newID(),lease_ttl_sec:300});render();note('正在申请控制权；5 分钟无操作后收回控制权。');}
   el('interact').onclick=acquire;
   el('view').onclick=()=>leave();
   el('keyboard').onclick=()=>{el('keys').hidden=!el('keys').hidden;el('keyboard').setAttribute('aria-expanded',String(!el('keys').hidden));if(!el('keys').hidden)el('text').focus();};
@@ -285,7 +346,7 @@ body:not(.debug) main{padding:0;align-items:flex-start}body:not(.debug) #stage{w
     clear('会话已离开');
   });
   window.addEventListener('resize',()=>{if(pointer)leave('视口改变，手势已取消');drawCursor();});
-  window.visualViewport?.addEventListener('resize',()=>{if(pointer)leave('视口改变，手势已取消');});
+  window.visualViewport?.addEventListener('resize',()=>{avoidKeyboard();if(pointer)leave('视口改变，手势已取消');});
   function action(id,fn){el(id).onclick=async()=>{if(busy)return;busy=true;try{await fn();}catch(e){clear(e.message);}finally{busy=false;}};}
   async function openView(){
     clearTimeout(reconnectTimer);clear('连接 View');const version=epoch;
