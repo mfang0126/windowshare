@@ -502,7 +502,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             frameLock.lock(); frameCount += 1; frameLock.unlock()
             callback(data)
-        } else { recordSampleOutcome(.encoding) }
+        } else { identity.discardFrames(binding); recordSampleOutcome(.encoding) }
     }
 
     // MARK: - SCStreamDelegate

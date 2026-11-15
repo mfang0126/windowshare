@@ -8,6 +8,8 @@
 
 1. 人类传输改为未来 publish 订阅：PairingSession 不保留 JPEG；每个 stream 仅一个待发送订阅，完成发送后再订阅；snapshot 等下一帧，2 秒无帧明确 503。网络发送受 32 客户端、16 MiB 单帧及 5 秒连接时限约束，不补发历史帧。`swift build --package-path host` exit 0（无捕获）；合成订阅用例在第 5 块补齐。
 
+2. 输入依据独立 `PublicationProof`（无像素，仅来源 binding/generation、geometry、epoch、displayTime、size、sequence）；编码成功且 publish 校验通过才生成。撤权、断开、重连、锁屏、几何变化、清理和编码失败清证明并推进时间围栏，旧 sample 不能复活。`swift build --package-path host` exit 0；撤权/编码失败合成用例在第 5 块补齐。
+
 ## 第七轮密码画面阻塞（2026-11-15，未完成，待拍板）
 
 协调端本轮明确采用临时收紧：认证后的 `/agent/snapshot` 一律返回 `503 frame_safety_unproven`，不读取/返回共享 JPEG；其余 Agent 输入、人类路径及所有帧/几何门禁保持原状。这不是完整密码策略实现，也不是密码安全验收。verify-agent-path.py exit 0：安全/敏感/恢复焦点的认证快照均 503 无像素，错误/缺失凭据 401，click/text 仍经原门禁返回，无真实捕获或输入。

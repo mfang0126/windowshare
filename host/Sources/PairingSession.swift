@@ -92,7 +92,14 @@ final class PairingSession {
         fileprivate let displayTime: UInt64
         fileprivate let size: [Int]
     }
-    private var frameProvenance: FrameProvenance?
+    /// Pixel-free evidence of an encoded, validated publication. Never minted by AX alone.
+    private struct PublicationProof {
+        let source: FrameProvenance
+        let sequence: UInt64
+        var epoch: Int { source.epoch }
+        var displayTime: UInt64 { source.displayTime }
+    }
+    private var publicationProof: PublicationProof?
     private var retiredOperations: Set<String> = []
     private var releasedDecisions: [String: String] = [:]
     private struct Stream {
@@ -147,12 +154,22 @@ final class PairingSession {
         let paused = screenLocked() || ((viewerSeen || capturePaused) && connections.isEmpty)
         guard paused != capturePaused else { return }
         capturePaused = paused
-        if paused { frameProvenance = nil; size = []; geometrySince = mach_absolute_time() }
+        if paused { clearPublication(); size = []; geometrySince = mach_absolute_time() }
         if let activityObserver { deferred.append { activityObserver(paused) } }
     }
     func shouldPauseCapture(_ expected: Binding) -> Bool { locked { binding != expected || capturePaused } }
     func discardFrames(_ expected: Binding) {
-        locked { if binding == expected { frameProvenance = nil; size = []; geometrySince = mach_absolute_time() } }
+        locked { if binding == expected { clearPublication(); size = []; geometrySince = mach_absolute_time() } }
+    }
+    /// Invalidates both proof and all not-yet-delivered subscriptions. A pre-invalidation sample
+    /// cannot revive authority even if its encoder completes after reconnect/cleanup/unlock.
+    private func clearPublication() {
+        publicationProof = nil
+        geometrySince = mach_absolute_time()
+        for stream in streams.values { stream.cancel() }
+        streams.removeAll()
+        for waiter in snapshots.values { waiter.stream.cancel() }
+        snapshots.removeAll()
     }
     static let cleanupRetryCap: TimeInterval = 30
     static func cleanupRetryDelay(failures: Int) -> TimeInterval {
@@ -215,7 +232,7 @@ final class PairingSession {
         if let lockObserver { screenNotifications.removeObserver(lockObserver) }
     }
 
-    func screenDidLock() { locked { revokeLease("screenLocked") } }
+    func screenDidLock() { locked { clearPublication(); revokeLease("screenLocked") } }
 
     private func locked<T>(_ action: () -> T) -> T {
         lock.lock()
@@ -258,9 +275,9 @@ final class PairingSession {
         viewerSeen = false; viewerGoneAt = nil; leaveReason = nil // the share is over: no left / disconnected for it
         sensitiveFocus = true; focusObservedAt = -.infinity
         active = false; linkClaimed = false // revoke before clearing output and credentials
-        binding = nil; frameProvenance = nil; size = []
+        binding = nil; clearPublication(); size = []
         shareDeadline = nil
-        geometry = nil; geometryEpoch += 1; frameProvenance = nil; geometrySince = mach_absolute_time()
+        geometry = nil; geometryEpoch += 1; clearPublication(); geometrySince = mach_absolute_time()
         pairs.removeAll(); sessions.removeAll(); endSessions.removeAll(); resumeTickets.removeAll()
     }
     /// `startedAt` (this object's clock): when the agent sent the start command; the 12 hours count from there.
@@ -299,11 +316,11 @@ final class PairingSession {
                   provenance.binding == expected,
                   provenance.geometry == geometry, provenance.epoch == geometryEpoch,
                   provenance.displayTime >= geometrySince, provenance.size == size,
-                  frameProvenance.map({ provenance.displayTime > $0.displayTime }) ?? true,
-                  data.count <= 16 * 1024 * 1024 else { return }
+                  publicationProof.map({ provenance.displayTime > $0.displayTime }) ?? true,
+                  !data.isEmpty, data.count <= 16 * 1024 * 1024 else { return }
             frameSequence &+= 1
             frameSensitive = sensitiveFocus || now() - focusObservedAt > 1
-            self.size = size; frameProvenance = provenance
+            self.size = size; publicationProof = PublicationProof(source: provenance, sequence: frameSequence)
             // Consume only already-armed subscriptions. No latest pixels and no per-peer backlog.
             for id in Array(streams.keys) {
                 guard let stream = streams[id], valid(stream), let send = stream.send else { continue }
@@ -341,7 +358,7 @@ final class PairingSession {
         resumeTickets = resumeTickets.filter { $0.value.deadline > time && $0.value.binding == binding }
         endSessions = endSessions.filter { $0.value.deadline > time && $0.value.binding == binding }
         sessions = sessions.filter { $0.value.deadline > time && pairs[$0.value.pair] != nil }
-        if pairCount != pairs.count || sessionCount != sessions.count { frameProvenance = nil; size = [] }
+        if pairCount != pairs.count || sessionCount != sessions.count { clearPublication(); size = [] }
     }
 
     private func valid(_ stream: Stream) -> Bool {
@@ -447,6 +464,7 @@ final class PairingSession {
         guard let previous = lease else { return }
         fputs("[session] lease revoked reason=\(reason)\n", stderr)
         lease = nil
+        clearPublication(); size = []
         emit("interact_revoked", "\(reason)")
         if let interactObserver { deferred.append { interactObserver(false) } }
         retiredOperations.insert(previous.owner.sessionID + ":" + previous.operation)
@@ -466,6 +484,7 @@ final class PairingSession {
             lossHint = now() - connection.pongAt >= 15 ? "heartbeat_timeout" : "connection_closed"
             leaveReason = leaveSignals.removeValue(forKey: id)
             connections[id] = nil
+            clearPublication(); size = []
             sessions[connection.session] = nil
             deferred.append(connection.cancel)
         }
@@ -486,6 +505,7 @@ final class PairingSession {
                   let session = sessions[issued.session], let pair = pairs[session.pair],
                   valid(Stream(session: issued.session, binding: session.binding, cancel: {})) else { return nil }
             for (id, old) in connections where old.session == issued.session {
+                clearPublication(); size = []
                 if lease?.owner == old.context { revokeLease("reconnect") }
                 connections[id] = nil; leaveSignals[id] = nil; deferred.append(old.cancel)
             }
@@ -548,6 +568,7 @@ final class PairingSession {
     func disconnect(_ context: Context) {
         locked {
             guard let connection = connections[context.connectionID], connection.context == context else { return }
+            clearPublication(); size = []
             sessions[connection.session] = nil
         }
     }
@@ -655,7 +676,7 @@ final class PairingSession {
                     geometryEpoch += 1; revokeLease("geometryChanged")
                 }
                 geometrySince = mach_absolute_time()
-                frameProvenance = nil; size = []
+                clearPublication(); size = []
             }
             geometry = value
             return geometryEpoch
@@ -670,8 +691,11 @@ final class PairingSession {
             guard current(context), cleanupPending == nil, var value = lease,
                   value.owner == context, value.id == id, value.epoch == epoch,
                   value.deadline > now(), generation == context.binding.generation,
-                  geometry == geometryEpoch, self.geometry != nil, frameProvenance != nil,
-                  frameProvenance?.epoch == geometryEpoch,
+                  geometry == geometryEpoch, self.geometry != nil, publicationProof != nil,
+                  publicationProof?.epoch == geometryEpoch,
+                  publicationProof?.source.binding == context.binding,
+                  publicationProof?.source.geometry == self.geometry,
+                  publicationProof!.displayTime >= geometrySince,
                   sequence > 0, sequence <= 9_007_199_254_740_991,
                   sequence > value.sequence || (sequence == value.sequence && value.execution == execution) else { return false }
             if screenLocked() { revokeLease("screenLocked"); return false }
@@ -728,6 +752,7 @@ final class PairingSession {
                 guard let bearer = Self.secret(), let digest = Self.digest(bearer),
                       let resume = Self.secret(), let resumeDigest = Self.digest(resume) else { return error(503) }
                 if let resumeKey { resumeTickets[resumeKey] = nil }
+                if sessions.values.contains(where: { $0.pair == key }) { clearPublication(); size = [] }
                 sessions = sessions.filter { $0.value.pair != key }
                 sessions[digest] = Session(pair: key, binding: pair.binding, deadline: min(now() + 900, pair.deadline))
                 endSessions = endSessions.filter { $0.value.pair != key }
@@ -772,7 +797,7 @@ final class PairingSession {
                 // 「停止观看」 is also a leave signal for this session's own viewer connections, whichever of this POST and
                 // the socket's `leave` message the host handles first.
                 for (id, connection) in connections where connection.session == sessionKey { leaveSignals[id] = "stop_watching" }
-                frameProvenance = nil; size = []
+                clearPublication(); size = []
                 var reply = Reply.json(200, ["status": "closed"]); if authorization == nil { reply.cookies = [Self.cookie("session")] }; return reply
             default:
                 guard exact([]), let sessionKey, let session = sessions[sessionKey],
@@ -795,7 +820,7 @@ final class PairingSession {
         }
         if path == base + "/meta" {
             var body = session.binding.json
-            body["available"] = frameProvenance != nil; body["size"] = size; body["dpi"] = "unknown"
+            body["available"] = publicationProof != nil; body["size"] = size; body["dpi"] = "unknown"
             body["mode"] = "View"; body["disabled_reason"] = "controls_not_enabled"
             body["server_time"] = Date().timeIntervalSince1970
             return .json(200, body)
