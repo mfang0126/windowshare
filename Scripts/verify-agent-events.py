@@ -76,10 +76,9 @@ func viewer(keep: Bool = false) -> (cookies: [String: String], context: PairingS
     alive = keep ? alive + [context] : [context]
     return (cookies, context)
 }
-/// What the page does: a `leave` message on its own control socket, the socket closes, then /session/close.
+/// Transport leave keeps resume authority; explicit HTTP close is tested separately below.
 func leave(_ v: (cookies: [String: String], context: PairingSession.Context), _ source: String) {
     identity.leave(v.context, source: source); identity.disconnect(v.context)
-    _ = phone("POST", "/session/close", [:], v.cookies)
     alive.removeAll { $0 == v.context }
 }
 func request(_ timeout: Int = 300) -> String {
@@ -165,8 +164,14 @@ tick(46); expect(["left:page_unload"], "page unload")
 // 「停止观看」 when the HTTP close is handled before the socket's leave message: still left.
 v = viewer(); _ = drain()
 precondition(phone("POST", "/session/close", [:], v.cookies).status == 200); alive = []
+precondition(phone("POST", "/session/end", [:], v.cookies).status == 401, "closed session cannot end share")
+precondition(shareAlive(), "rejected end from closed cookie preserves share")
 identity.leave(v.context, source: "stop"); identity.disconnect(v.context)
 tick(46); expect(["left:stop_watching"], "HTTP close first")
+// Explicit close also removes cookie-based rejoin authority: start a new share for the remaining cases.
+precondition(phone("POST", "/session", ["window_id": binding.windowID], v.cookies).status == 410)
+binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
+id = request(1800)
 // A leave from a connection that is already gone (or never was) changes nothing.
 v = viewer(); _ = drain(); let stale = v.context; identity.disconnect(stale); alive = []
 identity.leave(stale, source: "stop"); tick(46); expect(["disconnected:connection_lost/connection_closed"], "leave after the socket closed")
@@ -214,7 +219,9 @@ precondition(phone("POST", "/session/close", [:], [kv[0]: kv[1]]).status == 200)
 tick(60); expect([], "closed without a viewer connection")
 rB = request(1800)
 
-// N is configurable.
+// N is configurable. The previous cookie was explicitly closed; use a fresh share.
+binding = identity.selectWindow(); precondition(identity.activate(binding)); _ = drain()
+rB = request(1800)
 PairingSession.leaveGrace = 5
 v = viewer(); _ = drain(); identity.disconnect(v.context); alive = []
 tick(3); expect([], "N=5 not yet"); tick(3); expect(["disconnected:connection_lost/connection_closed"], "N=5")

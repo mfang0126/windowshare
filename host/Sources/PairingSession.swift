@@ -724,6 +724,7 @@ final class PairingSession {
             case "/session/close":
                 guard exact([]) else { return error(400) }
                 guard let sessionKey, sessions.removeValue(forKey: sessionKey) != nil else { return error(401) }
+                endSessions.removeValue(forKey: sessionKey)
                 // 「停止观看」 is also a leave signal for this session's own viewer connections, whichever of this POST and
                 // the socket's `leave` message the host handles first.
                 for (id, connection) in connections where connection.session == sessionKey { leaveSignals[id] = "stop_watching" }
