@@ -119,6 +119,22 @@ final class PairingSession {
     private var lockObserver: NSObjectProtocol?
     private let screenNotifications: NotificationCenter
     private var stateObserver: (() -> Void)?
+    private var activityObserver: ((Bool) -> Void)?
+    private var capturePaused = false
+    func observeCaptureActivity(_ observer: ((Bool) -> Void)?) {
+        locked { activityObserver = observer; if let observer { let paused = capturePaused; deferred.append { observer(paused) } } }
+    }
+    private func updateCaptureActivity() {
+        let paused = screenLocked() || ((viewerSeen || capturePaused) && connections.isEmpty)
+        guard paused != capturePaused else { return }
+        capturePaused = paused
+        if paused { frame = nil; size = []; frameProvenance = nil; geometrySince = mach_absolute_time() }
+        if let activityObserver { deferred.append { activityObserver(paused) } }
+    }
+    func shouldPauseCapture(_ expected: Binding) -> Bool { locked { binding != expected || capturePaused } }
+    func discardFrames(_ expected: Binding) {
+        locked { if binding == expected { frame = nil; size = []; frameProvenance = nil; geometrySince = mach_absolute_time() } }
+    }
     static let cleanupRetryCap: TimeInterval = 30
     static func cleanupRetryDelay(failures: Int) -> TimeInterval {
         min(cleanupRetryCap, pow(2, Double(min(5, max(0, failures - 1)))))
@@ -184,9 +200,9 @@ final class PairingSession {
 
     private func locked<T>(_ action: () -> T) -> T {
         lock.lock()
-        expire(); pruneControl()
+        expire(); pruneControl(); updateCaptureActivity()
         defer {
-            pruneControl(); pruneStreams(); trackPresence()
+            pruneControl(); pruneStreams(); updateCaptureActivity(); trackPresence()
             let work = deferred; deferred.removeAll()
             lock.unlock()
             for callback in work { callback() }
@@ -259,7 +275,7 @@ final class PairingSession {
     func publish(_ data: Data, size: [Int], binding expected: Binding, provenance: FrameProvenance? = nil) {
         locked {
             expire()
-            guard active, binding == expected, let provenance,
+            guard active, !capturePaused, binding == expected, let provenance,
                   provenance.binding == expected,
                   provenance.geometry == geometry, provenance.epoch == geometryEpoch,
                   provenance.displayTime >= geometrySince, provenance.size == size,

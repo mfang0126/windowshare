@@ -188,6 +188,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
                 next.startFrameWatcher()
                 if input { control?.setInput(nextInput) }
                 identity.observeInteract { [weak next] on in next?.setInteract(on) }
+                identity.observeCaptureActivity { [weak next, weak identity = identity] _ in
+                    DispatchQueue.main.async {
+                        guard let identity else { return }
+                        next?.setPaused(identity.shouldPauseCapture(binding))
+                    }
+                }
                 rebuildMenu()
             } catch {
                 let failure = error as NSError

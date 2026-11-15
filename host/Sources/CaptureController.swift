@@ -62,6 +62,8 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private let lifecycleLock = NSLock()
     private var cancelled = false
     private var starting = false
+    private var outputPaused = false
+    private var activityDriver: CapturePauseDriver?
     private let identity: PairingSession?
     private let binding: PairingSession.Binding?
     private var targetWatcher: DispatchSourceTimer?
@@ -249,8 +251,27 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             fputs("[capture] post-start acceptance rejected target=\(targetStillExists)\n", stderr)
             try? await stream.stopCapture(); throw CaptureError.windowNotFound
         }
+        let driver = CapturePauseDriver { paused in
+            if paused { try await stream.stopCapture() } else { try await stream.startCapture() }
+        }
+        lifecycle { activityDriver = driver }
         succeeded = true
         print("[capture] started")
+    }
+
+    /// Stop SCK entirely while the viewer is backgrounded or the Mac is locked; keep the selected target.
+    func setPaused(_ paused: Bool) {
+        let driver = lifecycle { () -> CapturePauseDriver? in
+            guard !cancelled else { return nil }
+            outputPaused = paused
+            if !paused { configurationSince = mach_absolute_time() }
+            return activityDriver
+        }
+        if paused, let binding { identity?.discardFrames(binding) }
+        Task {
+            do { try await driver?.setPaused(paused) }
+            catch { invalidate() }
+        }
     }
 
     /// Stream output pixels for a window of `points` at `scale`, long edge capped at 2560 by halving the scale.
@@ -394,8 +415,13 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             return old
         }
         frameWatcher?.cancel(); frameWatcher = nil
-        do { try await old?.stopCapture() }
-        catch { if let binding { identity?.revokeWindow(binding) }; fputs("[capture] stop failed\n", stderr) }
+        let driver = lifecycle { () -> CapturePauseDriver? in let value = activityDriver; activityDriver = nil; return value }
+        do { if let driver { try await driver.finish() } else { try await old?.stopCapture() } }
+        catch {
+            // A failed pause transition must not skip the final best-effort native stop.
+            try? await old?.stopCapture()
+            if let binding { identity?.revokeWindow(binding) }; fputs("[capture] stop failed\n", stderr)
+        }
         print("[capture] stopped")
     }
 
@@ -404,7 +430,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
         let callback = lifecycle { () -> ((Data) -> Void)? in
-            guard self.stream === stream, !cancelled else { return nil }; return onFrame
+            guard self.stream === stream, !cancelled, !outputPaused else { return nil }; return onFrame
         }
         guard let callback else { recordSampleOutcome(.inactive); return }
         guard sampleBuffer.isValid else { recordSampleOutcome(.invalidSample); return }
@@ -444,7 +470,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         let ready = lifecycle {
-            !cancelled && !configurationUpdating && self.stream === stream &&
+            !cancelled && !outputPaused && !configurationUpdating && self.stream === stream &&
                 captureSize == size && time >= configurationSince
         }
         guard ready else { recordSampleOutcome(.configuration); return }
@@ -464,7 +490,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let data = JPEGEncoder.encode(pb, crop: crop, quality: jpegQuality, maxEdge: edge) {
             lifecycle {
-                guard !cancelled, !configurationUpdating, self.stream === stream,
+                guard !cancelled, !outputPaused, !configurationUpdating, self.stream === stream,
                       time >= configurationSince, captureSize == size else { recordSampleOutcome(.configuration); return }
                 identity.publish(data, size: publishedSize, binding: binding, provenance: provenance)
                 // publish is void and may reject a concurrent authority/epoch change.
@@ -534,5 +560,30 @@ enum JPEGEncoder {
         CGImageDestinationAddImage(dest, image, maxEdge.map { [kCGImageDestinationImageMaxPixelSize: $0] as CFDictionary })
         guard CGImageDestinationFinalize(dest) else { return nil }
         return data as Data
+    }
+}
+
+/// Serializes asynchronous SCK stop/start transitions, including teardown during a pending resume.
+actor CapturePauseDriver {
+    private let transition: (Bool) async throws -> Void
+    private var desired = false, paused = false, busy = false, ended = false
+    private var failure: Error?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    init(transition: @escaping (Bool) async throws -> Void) { self.transition = transition }
+    func setPaused(_ value: Bool) async throws {
+        desired = ended || value
+        if busy { return }
+        if let failure { throw failure }
+        busy = true
+        defer { busy = false; let pending = waiters; waiters = []; pending.forEach { $0.resume() } }
+        do {
+            while paused != desired { let next = desired; try await transition(next); paused = next }
+        } catch { failure = error; throw error }
+    }
+    func finish() async throws {
+        ended = true
+        try await setPaused(true)
+        if busy { await withCheckedContinuation { waiters.append($0) } }
+        if let failure { throw failure }
     }
 }

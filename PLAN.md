@@ -16,6 +16,8 @@
 
 2026-11-15 第六轮续做 C：发链接前探测私有地址两个监听端口，默认 Tailscale、失败回落 LAN；--prefer-network lan/tailscale 在独立 UserDefaults suite 保存偏好。已认证页连续失败后携一次性恢复凭据跨地址重连，不把内部导航当关页；首次不可达无法回落的限制已写入需求。地址排序/偏好持久化、恢复凭据不可重放、Viewer 回落不结束共享及 Swift build 通过；真实跨网/手机回落未测。
 
+2026-11-15 第六轮后台 CPU：锁屏或最后一个查看连接离开后暂停 SCStream，清空授权帧；恢复连接/解锁后重启同一捕获目标，异步暂停/恢复/关闭串行化，不改帧率。capture-pause 无注入回归与 Swift build 通过。只读检查 Mac 为 LOCKED，按卡未做 CPU 前后测量、未操作窗口或解锁；实际节省待未锁时测。
+
 历史：v1.0.0 已发布（M1 + M2 + M4 完成；M2-b、M2-c 不做）。
 
 2026-11-15 第六轮第 2 项：CLI `list --include-offscreen --json` 返回离屏窗口及 `on_screen`，`--window-id` 可选离屏目标；菜单仍只列屏上窗口。无激活或窗口切换。`verify-offscreen-selection.swift` 与 Swift build 通过，Ego 离屏真实出帧未测。
