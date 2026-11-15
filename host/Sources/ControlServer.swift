@@ -318,7 +318,10 @@ final class ControlServer {
                 if context.role == "agent" {
                     // perform and its gate execute synchronously inside the main.async above,
                     // just like lease.acquire. Never main.sync here: that would self-deadlock.
-                    precondition(Thread.isMainThread, "Agent focus must be observed on the main thread")
+                    guard Thread.isMainThread else {
+                        fputs("[input] Agent gate rejected off main thread\n", stderr)
+                        return false
+                    }
                     identity.observeSensitiveFocus(input.sensitiveFocus(), binding: context.binding)
                 }
                 return identity.submit(context, id: id, epoch: epoch, sequence: sequence, generation: generation,

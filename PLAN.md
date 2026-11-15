@@ -12,6 +12,8 @@
 
 3. Agent snapshot 独立使用按请求 SCScreenshotManager：认证/lease/owner/epoch/lock/cleanup 与发布证明前后复核，主线程前后完整 AX 元数据观察（焦点、几何和树一致）；可见敏感文本、未知读取、超时、循环、深度/节点超限一律拒绝。仅编码并提交单个响应，无缓存；原生请求未结束时不启动第二个。`swift build --package-path host` exit 0；合成验证在第 5 块。
 
+4. `/session/close` 无条件删除该 cookie 的 endSessions，即使普通 session 已失效；生产 AX/gate 主线程要求改为固定诊断并拒绝，不崩溃 host。已知限制：焦点判断到 CGEvent/HID 输入仍非原子，主线程执行不能阻止其他进程在两者之间改变焦点。验证待全量回归。
+
 ## 第七轮密码画面阻塞（2026-11-15，未完成，待拍板）
 
 协调端本轮明确采用临时收紧：认证后的 `/agent/snapshot` 一律返回 `503 frame_safety_unproven`，不读取/返回共享 JPEG；其余 Agent 输入、人类路径及所有帧/几何门禁保持原状。这不是完整密码策略实现，也不是密码安全验收。verify-agent-path.py exit 0：安全/敏感/恢复焦点的认证快照均 503 无像素，错误/缺失凭据 401，click/text 仍经原门禁返回，无真实捕获或输入。
