@@ -174,7 +174,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - Capture
 
-    @MainActor func startCapture(_ window: WindowInfo, onFrame: @escaping (Data) -> Void) async throws {
+    @MainActor func startCapture(_ window: WindowInfo, includeOffscreen: Bool = false, onFrame: @escaping (Data) -> Void) async throws {
         guard lifecycle({
             guard stream == nil, !starting, !cancelled else { return false }
             starting = true; self.onFrame = onFrame; return true
@@ -195,7 +195,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         watchTarget(window, application: application, launchDate: launchDate)
         // Re-resolve the exact ID, including offscreen Agent targets; never activate another window.
-        let content = try await shareableContentWithTimeout(includeOffscreen: true)
+        let content = try await shareableContentWithTimeout(includeOffscreen: includeOffscreen)
         guard targetExists(window, application: application, launchDate: launchDate) else {
             fputs("[capture] revalidation target missing\n", stderr)
             throw CaptureError.windowNotFound

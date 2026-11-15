@@ -85,7 +85,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
                 fputs(String(decoding: CLI.listing(windows), as: UTF8.self) + "\n", stderr)
                 AgentFile.remove(); control?.stop(); exit(3)
             }
-            guard let binding = share(target, input: autoShare.interact, startedAt: autoShare.startedAt) else { AgentFile.remove(); control?.stop(); exit(4) }
+            guard let binding = share(target, input: autoShare.interact, includeOffscreen: autoShare.target.includesOffscreen, startedAt: autoShare.startedAt) else { AgentFile.remove(); control?.stop(); exit(4) }
             for entry in configuration.entries() {
                 print("[cli] entry \(EntryConfiguration.isTailscale(URL(string: entry)?.host ?? "") ? "tailscale" : "lan")=\(PairingSession.shareLink(entry, binding))")
             }
@@ -155,7 +155,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         if share(target, input: true) != nil { dropOpenerWatch() } // the menu share is the boss's, not the CLI opener's
     }
     /// Starts a new share (new link). nil when unavailable or another share holds the Mac-wide lock.
-    @discardableResult private func share(_ target: WindowInfo, input: Bool, startedAt: TimeInterval? = nil) -> PairingSession.Binding? {
+    @discardableResult private func share(_ target: WindowInfo, input: Bool, includeOffscreen: Bool = false, startedAt: TimeInterval? = nil) -> PairingSession.Binding? {
         guard unavailable.isEmpty else { return nil }
         do { try ShareLock.acquire(owner: "Mac 菜单栏（老板）") } // no-op when this process already holds it (CLI start)
         catch let busy as ShareLock.Busy { print("[share] busy: \(busy.message())"); show("WindowShare", busy.message()); return nil }
@@ -177,7 +177,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             await old?.stopCapture()
             do {
-                try await next.startCapture(target) { _ in }
+                try await next.startCapture(target, includeOffscreen: includeOffscreen) { _ in }
                 guard identity.isCurrent(binding) else { await next.stopCapture(); return }
                 let nextInput = InputController(window: target)
                 next.liveFrameProvider = { nextInput.liveRect() }

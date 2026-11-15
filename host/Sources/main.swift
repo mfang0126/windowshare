@@ -129,7 +129,7 @@ if opts.listWindows {
         do {
             let windows = try await CaptureController().listWindows(includeOffscreen: opts.includeOffscreen)
             if opts.json { print(String(decoding: CLI.listing(windows), as: UTF8.self)) }
-            else { for window in windows { print("\(window.id)\t\(window.ownerName)\t\(window.title ?? "")") } }
+            else { for window in windows { print("\(window.id)\ton_screen=\(window.scWindow.isOnScreen)\t\(window.ownerName)\t\(window.title ?? "")") } }
             exit(0)
         } catch { fputs("window listing failed\n", stderr); exit(1) }
     }
