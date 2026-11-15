@@ -6,6 +6,8 @@
 
 历史：v1.0.0 已发布（M1 + M2 + M4 完成；M2-b、M2-c 不做）。
 
+2026-11-15 第六轮第 2 项：CLI `list --include-offscreen --json` 返回离屏窗口及 `on_screen`，`--window-id` 可选离屏目标；菜单仍只列屏上窗口。无激活或窗口切换。`verify-offscreen-selection.swift` 与 Swift build 通过，Ego 离屏真实出帧未测。
+
 2026-11-15 PR #5 锁屏与清理修复：无注入回归覆盖定时撤权、通知、重试、恢复、事件投递及旧租约拒绝；设备验证未执行。
 
 ## M1 核心闭环：一条命令共享，Tailscale 上的手机能操作

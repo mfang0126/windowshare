@@ -75,7 +75,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
             let deadline = Date().addingTimeInterval(TimeInterval(autoShare.wait))
             var windows: [WindowInfo] = [], matches: [WindowInfo] = []
             while true {
-                windows = (try? await CaptureController().listWindows()) ?? []
+                windows = (try? await CaptureController().listWindows(includeOffscreen: autoShare.target.includesOffscreen)) ?? []
                 matches = autoShare.target.matches(in: windows)
                 if matches.count == 1 || Date() >= deadline { break }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)

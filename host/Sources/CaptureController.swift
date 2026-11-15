@@ -121,10 +121,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - Window listing
 
-    func listWindows() async throws -> [WindowInfo] {
-        let content = try await shareableContentWithTimeout()
+    func listWindows(includeOffscreen: Bool = false) async throws -> [WindowInfo] {
+        let content = try await shareableContentWithTimeout(includeOffscreen: includeOffscreen)
         return content.windows
-            .filter { $0.isOnScreen && $0.windowLayer == 0 }
+            .filter { Self.selectableWindow(onScreen: $0.isOnScreen, layer: $0.windowLayer, includeOffscreen: includeOffscreen) }
             .filter { ($0.title ?? "").isEmpty == false }
             .filter { $0.owningApplication?.processID != getpid() }
             .map {
@@ -140,6 +140,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             .sorted { "\($0.ownerName) \($0.title ?? "")" < "\($1.ownerName) \($1.title ?? "")" }
     }
 
+    static func selectableWindow(onScreen: Bool, layer: Int, includeOffscreen: Bool) -> Bool {
+        layer == 0 && (onScreen || includeOffscreen)
+    }
+
     @MainActor func ownedWindow(_ window: NSWindow) async throws -> WindowInfo {
         let number = window.windowNumber
         guard number > 0, window.isVisible, NSApp.window(withWindowNumber: number) === window else { throw CaptureError.windowNotFound }
@@ -150,10 +154,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
                           ownerPID: getpid(), frame: live.frame, scWindow: live)
     }
 
-    private func shareableContentWithTimeout(seconds: Int = 10) async throws -> SCShareableContent {
+    private func shareableContentWithTimeout(seconds: Int = 10, includeOffscreen: Bool = false) async throws -> SCShareableContent {
         try await withThrowingTaskGroup(of: SCShareableContent.self) { group in
             group.addTask {
-                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: !includeOffscreen)
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
@@ -190,8 +194,8 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CaptureError.windowNotFound
         }
         watchTarget(window, application: application, launchDate: launchDate)
-        // Re-resolve and compare the process instance before beginning this capture.
-        let content = try await shareableContentWithTimeout()
+        // Re-resolve the exact ID, including offscreen Agent targets; never activate another window.
+        let content = try await shareableContentWithTimeout(includeOffscreen: true)
         guard targetExists(window, application: application, launchDate: launchDate) else {
             fputs("[capture] revalidation target missing\n", stderr)
             throw CaptureError.windowNotFound
@@ -205,6 +209,9 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CaptureError.windowNotFound
         }
 
+        if !live.isOnScreen {
+            fputs("[capture] selected offscreen window by exact ID; no window activation. Minimized or non-rendering Space windows may not provide frames; show only the intended Space and reselect its verified window ID if needed.\n", stderr)
+        }
         let filter = SCContentFilter(desktopIndependentWindow: live)
         let config = SCStreamConfiguration()
         if #available(macOS 14.0, *) { config.ignoreShadowsSingleWindow = true }
