@@ -225,7 +225,9 @@ final class InputController {
     static func sensitiveFocus(role: String?, subrole: String?) -> Bool {
         guard let role else { return true }
         if [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) {
-            return subrole == nil || subrole == "AXSecureTextField"
+            // Only explicitly understood non-secure text subroles are allowed.
+            // AXUnknown (common even for ordinary text), nil and custom subroles fail closed.
+            return subrole != kAXSearchFieldSubrole
         }
         return ![kAXButtonRole, kAXCheckBoxRole, kAXRadioButtonRole, kAXWindowRole, kAXScrollAreaRole, "AXWebArea", "AXLink", kAXListRole].contains(role)
     }
@@ -261,9 +263,9 @@ final class InputController {
         let element = value as! AXUIElement
         var role: CFTypeRef?, subrole: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole) == .success,
-              subrole as? String != "AXSecureTextField" else { return false }
+              AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole) == .success else { return false }
         return [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role as? String ?? "")
+            && !Self.sensitiveFocus(role: role as? String, subrole: subrole as? String)
         #endif
     }
     private func mouse(_ type: CGEventType, point: CGPoint, button: CGMouseButton, count: Int = 1, diagnostic: Diagnostic?, gate: Gate) -> Bool {

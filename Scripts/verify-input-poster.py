@@ -23,7 +23,12 @@ import CoreGraphics
 precondition(InputController.sensitiveFocus(role: nil, subrole: nil))
 precondition(InputController.sensitiveFocus(role: "AXTextField", subrole: "AXSecureTextField"))
 precondition(InputController.sensitiveFocus(role: "AXTextField", subrole: nil))
-precondition(!InputController.sensitiveFocus(role: "AXTextField", subrole: "AXUnknown"))
+for role in ["AXTextField", "AXTextArea", "AXComboBox"] {
+ for subrole: String? in [nil, "AXUnknown", "AXSecureTextField", "CustomPassword", ""] {
+  precondition(InputController.sensitiveFocus(role: role, subrole: subrole))
+ }
+ precondition(!InputController.sensitiveFocus(role: role, subrole: "AXSearchField"))
+}
 precondition(!InputController.sensitiveFocus(role: "AXButton", subrole: nil))
 let window = WindowInfo(id: 0, ownerPID: 0)
 if CommandLine.arguments.contains("guard") {
