@@ -70,6 +70,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private var captureSize: [Int] = []
     private var configurationSince: UInt64 = 0
     private var configurationUpdating = false
+    private var agentSnapshotBusy = false // main-thread only; remains busy until the native request finishes
     private var privacyReader: (() -> Bool)?
     private var geometryReader: (() -> Result<[Double], PairingSession.GeometryFailure>)?
     var onInvalidated: (() -> Void)?
@@ -257,8 +258,43 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             if paused { try await stream.stopCapture() } else { try await stream.startCapture() }
         }
         lifecycle { activityDriver = driver }
+        if let identity {
+            identity.installAgentSnapshot { [weak self] grant, finish in
+                DispatchQueue.main.async { self?.captureAgentSnapshot(grant, finish: finish) }
+            }
+        }
         succeeded = true
         print("[capture] started")
+    }
+
+    /// Per-request SCK screenshot; never reads or writes the human stream or publication proof.
+    @MainActor private func captureAgentSnapshot(_ grant: PairingSession.AgentSnapshotGrant,
+        finish: @escaping (Result<PairingSession.AgentSnapshotFrame, PairingSession.AgentSnapshotFailure>) -> Void) {
+        guard #available(macOS 14.0, *), !agentSnapshotBusy,
+              let window = lifecycle({ !cancelled && !outputPaused && !configurationUpdating ? currentWindow : nil }),
+              binding == grant.binding, identity?.isCurrent(grant.binding) == true else { finish(.failure(.unavailable)); return }
+        let input = InputController(window: window)
+        guard let before = input.snapshotObservation(), before.geometry == grant.geometry else { finish(.failure(.sensitive)); return }
+        agentSnapshotBusy = true
+        let start = ProcessInfo.processInfo.systemUptime
+        let configuration = SCStreamConfiguration()
+        configuration.width = grant.size[0]; configuration.height = grant.size[1]
+        configuration.ignoreShadowsSingleWindow = true
+        configuration.showsCursor = false; configuration.capturesAudio = false
+        let filter = SCContentFilter(desktopIndependentWindow: window.scWindow)
+        Task { @MainActor in
+            defer { agentSnapshotBusy = false }
+            do {
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+                guard ProcessInfo.processInfo.systemUptime - start < 1.5,
+                      lifecycle({ !cancelled && !outputPaused && !configurationUpdating }),
+                      identity?.isCurrent(grant.binding) == true,
+                      image.width == grant.size[0], image.height == grant.size[1] else { finish(.failure(.unavailable)); return }
+                guard let after = input.snapshotObservation(), before.matches(after) else { finish(.failure(.sensitive)); return }
+                guard let data = JPEGEncoder.encodeImage(image) else { finish(.failure(.unavailable)); return }
+                finish(.success(.init(data: data, size: [image.width, image.height])))
+            } catch { finish(.failure(.unavailable)) }
+        }
     }
 
     /// Stop SCK entirely while the viewer is backgrounded or the Mac is locked; keep the selected target.
@@ -557,6 +593,9 @@ enum JPEGEncoder {
         var cgImage: CGImage?
         guard VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage) == noErr,
               let image = cgImage?.cropping(to: crop) else { return nil }
+        return encodeImage(image, quality: quality, maxEdge: maxEdge)
+    }
+    static func encodeImage(_ image: CGImage, quality: Double = 0.65, maxEdge: Int? = nil) -> Data? {
         let data = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationSetProperties(dest, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)

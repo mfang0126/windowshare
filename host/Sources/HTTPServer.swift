@@ -189,6 +189,13 @@ final class HTTPServer {
             queue.asyncAfter(deadline: .now() + 2) { [weak self, weak client] in
                 if let id = client?.snapshotID { self?.identity.finishSnapshot(id) }
             }
+        } else if method == "GET", isAgent, path == "/agent/snapshot" {
+            client.answered = true; client.data.removeAll()
+            identity.agentSnapshot(authorization: headers["authorization"], cookies: cookies, loopback: true) { reply in
+                var payload = Data(self.responseHeader(reply, controlOrigin: client.controlOrigin).utf8)
+                payload.append(reply.body)
+                client.conn.send(content: payload, completion: .contentProcessed { [weak self] _ in self?.close(client) })
+            }
         } else if method == "GET", isAgent, path.hasPrefix("/agent/events/") {
             // Agent event long poll: held up to 3 s (under the 5 s idle close), re-checked every 50 ms. At most 4 at once
             // so a looping agent cannot take the 32 connection slots from phones.

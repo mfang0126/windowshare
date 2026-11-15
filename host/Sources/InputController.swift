@@ -252,6 +252,95 @@ final class InputController {
         return Self.sensitiveFocus(role: role as? String, subrole: subrole as? String)
         #endif
     }
+    /// Metadata-only bounded AX observation. An incomplete tree is never a safe tree.
+    struct SnapshotObservation {
+        let focus: AXUIElement
+        let geometry: [Double]
+        let nodes: [CFTypeRef]
+        func matches(_ other: SnapshotObservation) -> Bool {
+            geometry == other.geometry && CFEqual(focus, other.focus) && nodes.count == other.nodes.count &&
+                zip(nodes, other.nodes).allSatisfy { CFEqual($0, $1) }
+        }
+    }
+    struct SnapshotNode {
+        let role: String
+        let subrole: String
+        let bounds: CGRect
+        let children: [CFTypeRef]
+    }
+    /// The production traversal and synthetic fixtures share these bounds and sensitivity rules.
+    static func snapshotTree(root: CFTypeRef, visible: CGRect, deadline: TimeInterval,
+                             clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                             read: (CFTypeRef, Int) -> SnapshotNode?) -> [CFTypeRef]? {
+        var stack: [(CFTypeRef, Int)] = [(root, 0)]
+        var seen: [CFTypeRef] = [], result: [CFTypeRef] = []
+        while let (element, depth) = stack.popLast() {
+            guard clock() < deadline, depth <= 16, seen.count < 256,
+                  !seen.contains(where: { CFEqual($0, element) }),
+                  let node = read(element, 256 - seen.count - stack.count - 1),
+                  !node.bounds.isNull,
+                  [node.bounds.minX, node.bounds.minY, node.bounds.width, node.bounds.height].allSatisfy({ $0.isFinite }),
+                  node.bounds.width >= 0, node.bounds.height >= 0 else { return nil }
+            if node.bounds.intersects(visible) && (node.role == kAXSecureTextFieldSubrole || node.subrole == kAXSecureTextFieldSubrole ||
+                ([kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(node.role) && sensitiveFocus(role: node.role, subrole: node.subrole))) { return nil }
+            seen.append(element)
+            guard node.children.count <= 256 - seen.count - stack.count else { return nil }
+            result.append(["element": element, "role": node.role, "subrole": node.subrole,
+                           "bounds": [node.bounds.minX, node.bounds.minY, node.bounds.width, node.bounds.height]] as CFDictionary)
+            stack.append(contentsOf: node.children.map { ($0, depth + 1) })
+        }
+        return clock() < deadline ? result : nil
+    }
+    func snapshotObservation() -> SnapshotObservation? {
+        guard Thread.isMainThread, !isLocked() else { return nil }
+        #if WINDOWSHARE_TEST
+        return nil // Tests inject observations; never touch real AX in a synthetic build.
+        #else
+        let started = ProcessInfo.processInfo.systemUptime
+        let app = AXUIElementCreateApplication(window.ownerPID)
+        guard AXUIElementSetMessagingTimeout(app, 0.05) == .success,
+              case .success(let geometry) = measure(), geometry.count == 5 else { return nil }
+        func read(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+            guard ProcessInfo.processInfo.systemUptime - started < 0.25,
+                  AXUIElementSetMessagingTimeout(element, 0.05) == .success else { return nil }
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+        guard let focusedWindow = read(app, kAXFocusedWindowAttribute),
+              CFGetTypeID(focusedWindow) == AXUIElementGetTypeID(),
+              Self.windowID(focusedWindow as! AXUIElement) == window.id,
+              let focused = read(app, kAXFocusedUIElementAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        let focus = focused as! AXUIElement
+        guard Self.windowID(focus) == window.id, let role = read(focus, kAXRoleAttribute) as? String,
+              let subrole = read(focus, kAXSubroleAttribute) as? String,
+              !Self.sensitiveFocus(role: role, subrole: subrole) else { return nil }
+        let visible = CGRect(x: geometry[0], y: geometry[1], width: geometry[2], height: geometry[3])
+        let target = focusedWindow as! AXUIElement
+        guard rect(target) == visible else { return nil }
+        guard let nodes = Self.snapshotTree(root: target, visible: visible, deadline: started + 0.25, read: { value, remaining in
+            guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            let element = value as! AXUIElement
+            guard let role = read(element, kAXRoleAttribute) as? String,
+                  let subrole = read(element, kAXSubroleAttribute) as? String,
+                  let bounds = rect(element) else { return nil }
+            var count: CFIndex = 0
+            guard AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &count) == .success,
+                  count >= 0, count <= remaining else { return nil }
+            var values: [CFTypeRef] = []
+            if count > 0 {
+                var children: CFArray?
+                guard AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, count, &children) == .success,
+                      let array = children as? [AXUIElement], array.count == count else { return nil }
+                values = array
+            }
+            return SnapshotNode(role: role, subrole: subrole, bounds: bounds, children: values)
+        }) else { return nil }
+        guard ProcessInfo.processInfo.systemUptime - started < 0.25,
+              case .success(let finalGeometry) = measure(), finalGeometry == geometry else { return nil }
+        return SnapshotObservation(focus: focus, geometry: geometry, nodes: nodes)
+        #endif
+    }
     /// Metadata only: never read AXValue, selected text, labels or password contents.
     func focusedTextEntry() -> Bool {
         #if WINDOWSHARE_TEST

@@ -121,7 +121,6 @@ final class PairingSession {
     private var binding: Binding?
     private var active = false
     private var linkClaimed = false
-    private var frameSensitive = true
     private var size: [Int] = []
     private var pairs: [String: Pair] = [:]
     private var sessions: [String: Session] = [:]
@@ -141,7 +140,6 @@ final class PairingSession {
         locked {
             guard binding == expected else { return }
             sensitiveFocus = sensitive; focusObservedAt = now()
-            if sensitive { frameSensitive = true }
             if sensitive, lease?.owner.role == "agent" { revokeLease("sensitiveFocus") }
         }
     }
@@ -171,6 +169,78 @@ final class PairingSession {
         for waiter in snapshots.values { waiter.stream.cancel() }
         snapshots.removeAll()
     }
+    struct AgentSnapshotGrant {
+        let binding: Binding
+        let geometry: [Double]
+        let epoch: Int
+        let size: [Int]
+        fileprivate let owner: Context
+        fileprivate let leaseID: String
+        fileprivate let leaseEpoch: Int
+        fileprivate let fence: UInt64
+    }
+    enum AgentSnapshotFailure: Error { case sensitive, unavailable }
+    struct AgentSnapshotFrame { let data: Data; let size: [Int] }
+    typealias AgentSnapshotProvider = (AgentSnapshotGrant, @escaping (Result<AgentSnapshotFrame, AgentSnapshotFailure>) -> Void) -> Void
+    private var agentSnapshotProvider: AgentSnapshotProvider?
+    private var pendingAgentSnapshot: UUID?
+    func installAgentSnapshot(_ provider: @escaping AgentSnapshotProvider) { locked { agentSnapshotProvider = provider } }
+
+    private func agentSnapshotGate() -> Reply? {
+        guard agentFocusAllowed else { return .json(423, ["error": "password_focused"]) }
+        guard active, let lease, lease.owner.role == "agent", current(lease.owner),
+              controlAllowed(lease.owner), lease.deadline > now(), cleanupPending == nil else {
+            return .json(409, ["error": "lease_required"])
+        }
+        guard !capturePaused, let proof = publicationProof, proof.epoch == geometryEpoch,
+              proof.source.binding == binding, proof.source.geometry == geometry,
+              proof.displayTime >= geometrySince else { return .json(503, ["error": "frame_unavailable"]) }
+        return nil
+    }
+    /// Independent capture: authorization before capture and again at the single response commit.
+    /// Provider callbacks contain at most one in-flight frame, never a human-stream frame.
+    func agentSnapshot(authorization: String?, cookies: [String: String], loopback: Bool,
+                       commit: @escaping (Reply) -> Void) {
+        locked {
+            guard loopback, cookies.isEmpty else { commit(.json(403, ["status": "rejected"])); return }
+            guard AgentFile.authorized(authorization, token: agentToken) else { commit(.json(401, ["status": "rejected"])); return }
+            if let failure = agentSnapshotGate() { commit(failure); return }
+            guard pendingAgentSnapshot == nil, let provider = agentSnapshotProvider,
+                  let proof = publicationProof, let lease else { commit(.json(503, ["error": "frame_unavailable"])); return }
+            let id = UUID(); pendingAgentSnapshot = id
+            let grant = AgentSnapshotGrant(binding: lease.owner.binding, geometry: proof.source.geometry,
+                epoch: geometryEpoch, size: proof.source.size, owner: lease.owner,
+                leaseID: lease.id, leaseEpoch: lease.epoch, fence: geometrySince)
+            let finish: (Result<AgentSnapshotFrame, AgentSnapshotFailure>) -> Void = { [weak self] result in
+                guard let self else { return }
+                self.locked {
+                    guard self.pendingAgentSnapshot == id else { return }
+                    self.pendingAgentSnapshot = nil
+                    if let failure = self.agentSnapshotGate() { commit(failure); return }
+                    guard self.binding == grant.binding, self.geometryEpoch == grant.epoch,
+                          self.geometry == grant.geometry, self.geometrySince == grant.fence,
+                          self.lease?.id == grant.leaseID, self.lease?.epoch == grant.leaseEpoch,
+                          self.lease?.owner == grant.owner else { commit(.json(503, ["error": "frame_unavailable"])); return }
+                    switch result {
+                    case .failure(.sensitive): commit(.json(423, ["error": "password_focused"]))
+                    case .failure(.unavailable): commit(.json(503, ["error": "frame_unavailable"]))
+                    case .success(let frame):
+                        guard frame.size == grant.size, !frame.data.isEmpty, frame.data.count <= 16 * 1024 * 1024 else {
+                            commit(.json(503, ["error": "frame_unavailable"])); return
+                        }
+                        var reply = Reply(status: 200, body: frame.data, type: "image/jpeg")
+                        reply.headers["X-WindowShare-Geometry-Epoch"] = String(grant.epoch)
+                        commit(reply)
+                    }
+                }
+            }
+            deferred.append {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) { finish(.failure(.unavailable)) }
+                provider(grant, finish)
+            }
+        }
+    }
+
     static let cleanupRetryCap: TimeInterval = 30
     static func cleanupRetryDelay(failures: Int) -> TimeInterval {
         min(cleanupRetryCap, pow(2, Double(min(5, max(0, failures - 1)))))
@@ -319,7 +389,6 @@ final class PairingSession {
                   publicationProof.map({ provenance.displayTime > $0.displayTime }) ?? true,
                   !data.isEmpty, data.count <= 16 * 1024 * 1024 else { return }
             frameSequence &+= 1
-            frameSensitive = sensitiveFocus || now() - focusObservedAt > 1
             self.size = size; publicationProof = PublicationProof(source: provenance, sequence: frameSequence)
             // Consume only already-armed subscriptions. No latest pixels and no per-peer backlog.
             for id in Array(streams.keys) {
@@ -849,10 +918,10 @@ final class PairingSession {
             return .json(200, ["ticket": ticket, "resource": resource, "window_id": binding.windowID, "window_generation": binding.generation])
         }
         if method == "GET", path == "/agent/snapshot" {
-            // AX focus and SCK pixels are not an atomic observation. The shared human
-            // transport cache cannot prove an entire frame is non-sensitive. Fail closed
-            // until a separate, proven-safe Agent frame source exists (see PLAN.md).
-            return .json(503, ["error": "frame_safety_unproven"])
+            guard fields.isEmpty else { return .json(400, ["error": "bad_request"]) }
+            if let failure = agentSnapshotGate() { return failure }
+            // Synchronous callers have no independent capture transaction; HTTP uses agentSnapshot.
+            return .json(503, ["error": "frame_unavailable"])
         }
         if method == "POST", path == "/agent/request" {
             guard Set(fields.keys) == ["reason", "timeout_sec"], let reason = fields["reason"] as? String,
