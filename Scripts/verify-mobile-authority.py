@@ -21,6 +21,11 @@ func json(_ r: PairingSession.Reply) -> [String: Any] { try! JSONSerialization.j
 let first = call("/session", ["window_id":b.windowID]);precondition(first.status == 200)
 precondition(call("/session", ["window_id":b.windowID]).status == 410, "uncredentialed second redemption")
 var cookies = cookie(first)
+let resume = json(first)["resume"] as! String
+let switched = call("/session", ["window_id":b.windowID,"resume":resume])
+precondition(switched.status == 200, "cross-address resume with one-use capability")
+precondition(call("/session", ["window_id":b.windowID,"resume":resume]).status == 403, "resume cannot replay")
+cookies = cookie(switched)
 func connect() -> PairingSession.Context {
  let t=json(call("/w/\(b.windowID)/connect", [:], cookies))
  return s.authenticate(ticket:t["ticket"] as! String,resource:t["resource"] as! String,cancel:{})!

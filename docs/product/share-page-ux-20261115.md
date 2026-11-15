@@ -22,6 +22,10 @@
 
 默认用 Tailscale 地址，在家和外出用同一个链接；连不上就自动换成本地局域网地址。用户改成哪种就记住，以后默认用这种。不开公网，不动 Tailscale 配置。
 
+host 在发链接前探测本机各私有地址的 HTTP 和控制监听端口，优先选择 Tailscale，失败才选 LAN。此探测只能证明 host 侧监听可达，不能证明远端手机有同一路由。分享命令加 `--prefer-network lan` 记住局域网偏好，加 `--prefer-network tailscale` 改回；偏好存在 `com.windowshare.network` UserDefaults 的 `entryPreference`。
+
+已加载并认证的页面断线后，可用一次性恢复凭据切到另一已探测地址；恢复凭据放 URL fragment，兑换后清除，不进查询参数或日志。首次打开的地址完全不可达时页面尚未加载，无法跨网自动切换，需用可达地址的新链接。
+
 ## D. 给 AI 用的路径
 
 AI 主要取单帧，不录像；录短片只用在 debug 里排查闪烁和卡顿。

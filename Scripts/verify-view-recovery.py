@@ -8,7 +8,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 js = (root / 'host/Sources/ViewerPage.swift').read_text().split('<script>')[1].split('</script>')[0]
 js = js.replace('  openView().catch(e=>recover(e.message));', '''
-  globalThis.test={recover,openView,clear,textChunks,queueText,acquire,touchStart,touchMove,touchEnd,flushTap,flushPhoneText,mobile(){return {zoom,panX,panY,pendingTap,touches:touches.size}},prime(){displayedGeometry=authority.geometry_epoch;},setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
+  globalThis.test={recover,openView,clear,textChunks,queueText,acquire,fallbackSetup(){stopped=false;failures=0;alternatives=['http://192.168.1.2:8777/'];resumeToken='test-capability';},touchStart,touchMove,touchEnd,flushTap,flushPhoneText,mobile(){return {zoom,panX,panY,pendingTap,touches:touches.size}},prime(){displayedGeometry=authority.geometry_epoch;},setup(){binding={window_id:'w',window_generation:'g'};wanted=true;lease={lease_id:'old'};pending=1;latest={t:'click'};},values(){return {wanted,lease,pending,latest,binding}}};
 ''')
 harness = r'''
 const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
@@ -98,6 +98,10 @@ vm.createContext(c);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),c);c
  const beacons=[];c.Blob=Blob;c.navigator.sendBeacon=(...args)=>{beacons.push(args);return true};
  events.pagehide();assert.equal(sent.at(-1).source,'end');assert.equal(beacons[0][0],'/session/end');
  assert.equal(await beacons[0][1].text(),'{}');timers.clear();events.online();assert.equal(timers.size,0);
+ // A loaded page can navigate to a private alternate without ending the share or putting capability in a query.
+ let destination=null;c.location.replace=value=>destination=value;t.fallbackSetup();t.recover();t.recover();t.recover();
+ assert.equal(destination,'http://192.168.1.2:8777/w/w#resume=test-capability');
+ const beaconCount=beacons.length;events.pagehide();assert.equal(beacons.length,beaconCount);
  console.log('PASS automatic View recovery, background return, no input/lease replay, explicit stop, ended/bare link stops, lease granted note, host exit ends share, done and stop clear the lease note, poll failure does not hide host end');
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''

@@ -35,13 +35,15 @@ body:not(.debug) main{padding:0;align-items:flex-start;overflow:hidden}body:not(
 (() => {
   let controlsEnabled=false;
   const el=id=>document.getElementById(id), image=el('stream'), stage=el('stage');
-  const debug=location.hash==='#debug';document.body?.classList.toggle('debug',debug);
+  const debug=location.hash?.includes('debug')===true;document.body?.classList.toggle('debug',debug);
   // Latency probe (#latency): click → first displayed frame whose brightness flips. Target window: Scripts/latency-target.html.
   const lat=location.hash==='#latency'?(window.__latency={t0:0,from:0,lum:0,ms:[]}):null, lc=lat&&document.createElement('canvas').getContext('2d',{willReadFrequently:true});
   function lum(){lc.drawImage(image,0,0,4,4);const d=lc.getImageData(0,0,4,4).data;let s=0;for(let i=0;i<d.length;i+=4)s+=d[i]+d[i+1]+d[i+2];return s/(48*255);}
   function latFrame(){if(!lat)return;lat.lum=lum();if(lat.t0&&Math.abs(lat.lum-lat.from)>0.5){lat.ms.push(Math.round(performance.now()-lat.t0));lat.t0=0;}}
   let binding=null, timer=null, epoch=0, busy=false, socket=null, poll=null;
-  let reconnectTimer=null, stopped=false;
+  let reconnectTimer=null, stopped=false, reconnectNavigating=false, failures=0;
+  let resumeToken=location.hash?.match(/(?:^#|&)resume=([A-Za-z0-9_-]+)/)?.[1]||null, alternatives=[];
+  let resumeOnOpen=resumeToken!==null;
   let authority=null, lease=null, wanted=false, seq=0, pending=null, latest=null, finalUp=null;
   let displayedGeometry=null, frameURL=null, snapshotTimer=null, snapshotBusy=false, frameVersion=0;
   let pointer=null, longTimer=null, dragging=false, cur={x:.5,y:.5}, composing=false;
@@ -77,6 +79,12 @@ body:not(.debug) main{padding:0;align-items:flex-start;overflow:hidden}body:not(
     clear(message);clearTimeout(reconnectTimer);el('reconnect').hidden=stopped||document.hidden;
     if(stopped||document.hidden)return;
     const version=epoch;
+    failures++;
+    // Only a page that already authenticated has a one-use resume capability. Never send credentials in a query.
+    if(failures>=3&&resumeToken&&alternatives.length){
+      const entry=alternatives.shift();reconnectNavigating=true;
+      location.replace(entry.replace(/\/$/,'')+base()+'#'+(debug?'debug&':'')+'resume='+resumeToken);return;
+    }
     reconnectTimer=setTimeout(()=>{if(version===epoch&&!stopped&&!document.hidden)openView().catch(e=>recover(e.message));},1500);
   }
   async function api(path,body,signal){
@@ -182,7 +190,7 @@ body:not(.debug) main{padding:0;align-items:flex-start;overflow:hidden}body:not(
         let m;try{m=JSON.parse(event.data);}catch{clear('控制协议错误');return;}
         if(m.t==='focus'){if(!debug&&ready()&&m.lease_id===lease.lease_id&&m.lease_epoch===lease.lease_epoch&&m.editable===true){el('phoneText').focus({preventScroll:true});avoidKeyboard();}return;}
         if(m.t==='heartbeat'){if(!document.hidden)raw({t:'pong',nonce:m.nonce});return;}
-        if(m.t==='state'){el('reconnect').hidden=true;state(m);if(!authenticated&&authority){authenticated=true;note('正在观看；需要操作时开启 Interact。');}return;}
+        if(m.t==='state'){failures=0;el('reconnect').hidden=true;state(m);if(!authenticated&&authority){authenticated=true;note('正在观看；需要操作时开启 Interact。');}return;}
         if(m.t==='ack'||m.t==='error'){
           if(m.t==='error'&&m.retryable===true){pending=null;sentText=null;textQueue=[];latest=finalUp=null;note('这次操作未执行；控制权保留，请确认目标窗口后再操作。');render();return;}
           if(m.t==='error'){leave(m.status==='screenLocked'?'Mac 已锁屏，请先解锁':'控制已停止；操作可能部分执行，请查看窗口结果，不要重复提交。');return;}
@@ -340,6 +348,7 @@ body:not(.debug) main{padding:0;align-items:flex-start;overflow:hidden}body:not(
   // Normal page departure ends this share. The authenticated beacon also works after background control suspension.
   // Browser termination or offline departure may deliver neither signal; those remain disconnected, never false done.
   window.addEventListener('pagehide',()=>{
+    if(reconnectNavigating){clear('切换连接');return;}
     stopped=true;clearTimeout(reconnectTimer);
     raw({t:'leave',source:debug?'unload':'end'});
     if(!debug&&binding)navigator.sendBeacon?.('/session/end',new Blob(['{}'],{type:'application/json'}));
@@ -351,9 +360,12 @@ body:not(.debug) main{padding:0;align-items:flex-start;overflow:hidden}body:not(
   async function openView(){
     clearTimeout(reconnectTimer);clear('连接 View');const version=epoch;
     const requested=location.pathname.match(/^\/w\/([A-Za-z0-9-]+)$/)?.[1];
-    const r=await api('/session',binding||(requested?{window_id:requested}:{}),AbortSignal.timeout(5000));
+    const request=binding||(requested?{window_id:requested}:{});if(resumeOnOpen&&resumeToken)request.resume=resumeToken;
+    const r=await api('/session',request,AbortSignal.timeout(5000));
     if(version!==epoch||stopped||document.hidden)return;
     binding={window_id:r.window_id,window_generation:r.window_generation};tuning=r.tuning||{};
+    resumeToken=r.resume||null;resumeOnOpen=false;
+    alternatives=(r.entries||[]).filter(entry=>typeof entry==='string'&&/^http:\/\/(?:100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+):\d+\/$/.test(entry)&&!entry.startsWith(location.protocol+'//'+(location.host||location.hostname+':'+location.port)+'/'));
     history.replaceState(null,'',base()+(debug?'#debug':''));watch();
   }
   action('retry',async()=>{stopped=false;await openView();});

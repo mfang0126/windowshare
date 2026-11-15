@@ -113,6 +113,7 @@ final class PairingSession {
     private var sessions: [String: Session] = [:]
     // Close/reconnect authority survives transport suspension; never directly accepted for frames, tickets or input.
     private var endSessions: [String: Session] = [:]
+    private var resumeTickets: [String: Session] = [:]
     private var expiryTimer: DispatchSourceTimer?
     private var unlockObserver: NSObjectProtocol?
     private var lockObserver: NSObjectProtocol?
@@ -224,7 +225,7 @@ final class PairingSession {
         binding = nil; frame = nil; size = []
         shareDeadline = nil
         geometry = nil; geometryEpoch += 1; frameProvenance = nil; geometrySince = mach_absolute_time()
-        pairs.removeAll(); sessions.removeAll(); endSessions.removeAll()
+        pairs.removeAll(); sessions.removeAll(); endSessions.removeAll(); resumeTickets.removeAll()
     }
     /// `startedAt` (this object's clock): when the agent sent the start command; the 12 hours count from there.
     @discardableResult func selectWindow(startedAt: TimeInterval? = nil) -> Binding {
@@ -286,6 +287,7 @@ final class PairingSession {
         }
         let pairCount = pairs.count, sessionCount = sessions.count
         pairs = pairs.filter { $0.value.deadline > time }
+        resumeTickets = resumeTickets.filter { $0.value.deadline > time && $0.value.binding == binding }
         endSessions = endSessions.filter { $0.value.deadline > time && $0.value.binding == binding }
         sessions = sessions.filter { $0.value.deadline > time && pairs[$0.value.pair] != nil }
         if pairCount != pairs.count || sessionCount != sessions.count { frame = nil; size = [] }
@@ -627,29 +629,39 @@ final class PairingSession {
                 // Only this share's link joins it (ADR 0003 rule 5): the bare entry never attaches to whatever is shared now,
                 // and an ended share's id is gone for good (410), even after a new share starts on the same port.
                 if exact([]) { return .json(403, ["status": "rejected", "reason": "share_link_required"]) }
-                guard exact(["window_id"]) || exact(["window_id", "window_generation"]) else { return error(400) }
+                guard exact(["window_id"]) || exact(["window_id", "window_generation"]) || exact(["window_id", "resume"]) || exact(["window_id", "window_generation", "resume"]) else { return error(400) }
                 guard let binding, fields["window_id"] as? String == binding.windowID else { return .json(410, ["status": "ended"]) }
                 guard active else { return error(503) }
                 guard fields["window_generation"] == nil || fields["window_generation"] as? String == binding.generation else { return error(403) }
+                let resumeKey = Self.digest(fields["resume"] as? String)
+                let resumed = resumeKey.flatMap { resumeTickets[$0] }
+                if fields["resume"] != nil && (resumed == nil || resumed?.binding != binding) { return error(403) }
+                let effectivePair = resumed?.pair ?? pairKey
                 let key: String
                 let pair: Pair
-                if let pairKey, let existing = pairs[pairKey], existing.binding == binding {
-                    key = pairKey; pair = existing
+                if let effectivePair, let existing = pairs[effectivePair], existing.binding == binding {
+                    key = effectivePair; pair = existing
                 } else {
                     guard !linkClaimed else { return .json(410, ["status": "consumed"]) }
                     guard let token = Self.secret(), let digest = Self.digest(token) else { return error(503) }
                     key = digest; pair = Pair(binding: binding, deadline: now() + 8 * 3600)
                     pairs[key] = pair
                 }
-                guard let bearer = Self.secret(), let digest = Self.digest(bearer) else { return error(503) }
+                guard let bearer = Self.secret(), let digest = Self.digest(bearer),
+                      let resume = Self.secret(), let resumeDigest = Self.digest(resume) else { return error(503) }
+                if let resumeKey { resumeTickets[resumeKey] = nil }
                 sessions = sessions.filter { $0.value.pair != key }
                 sessions[digest] = Session(pair: key, binding: pair.binding, deadline: min(now() + 900, pair.deadline))
                 endSessions = endSessions.filter { $0.value.pair != key }
                 endSessions[digest] = sessions[digest]
+                resumeTickets = resumeTickets.filter { $0.value.pair != key }
+                resumeTickets[resumeDigest] = sessions[digest]
                 linkClaimed = true
                 var body = pair.binding.json; body["mode"] = "View"; body["role"] = "human"
                 body["principal_id"] = pair.principal; body["expires_in"] = min(900, pair.deadline - now())
                 body["tuning"] = Tuning.page
+                body["resume"] = resume
+                body["entries"] = agentEntries
                 var reply = Reply.json(200, body)
                 reply.cookies = [Self.cookie("session", bearer)]
                 return reply

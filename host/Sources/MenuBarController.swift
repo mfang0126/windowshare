@@ -16,6 +16,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     private var selection: PairingSession.Binding?
     private var lastEnded: PairingSession.Binding? // the share whose CLI exit is pending (N2)
     private var targetLabel = ""
+    private var resolvedEntries: [String]?
+    private var phoneEntries: [String] { resolvedEntries ?? configuration.entries() }
     private var workspaceObservers: [NSObjectProtocol] = []
     private var unavailable = Set<Notification.Name>()
 
@@ -66,6 +68,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
             if autoShare != nil { exit(7) } // the CLI caller needs a failure code, not a clean exit
             NSApp.terminate(nil); return
         }
+        resolvedEntries = configuration.proxied ? configuration.entries() : configuration.reachableEntries()
+        if autoShare != nil && phoneEntries.isEmpty { fputs("[cli] no reachable private entry listeners\n", stderr); nextControl.stop(); exit(6) }
         publishAgentFile()
         rebuildMenu()
         guard let autoShare else { openBrowser(); return }
@@ -86,20 +90,17 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
                 AgentFile.remove(); control?.stop(); exit(3)
             }
             guard let binding = share(target, input: autoShare.interact, includeOffscreen: autoShare.target.includesOffscreen, startedAt: autoShare.startedAt) else { AgentFile.remove(); control?.stop(); exit(4) }
-            for entry in configuration.entries() {
-                print("[cli] entry \(EntryConfiguration.isTailscale(URL(string: entry)?.host ?? "") ? "tailscale" : "lan")=\(PairingSession.shareLink(entry, binding))")
-            }
             print("[cli] sharing window id=\(target.id) owner=\(target.ownerName) title=\(target.title ?? "") interact=\(autoShare.interact) entry=\(PairingSession.shareLink(phoneEntry, binding))")
             fflush(stdout)
         }
     }
-    private var phoneEntry: String { configuration.entries().first ?? "http://localhost:\(configuration.port)/" }
+    private var phoneEntry: String { phoneEntries.first ?? "http://localhost:\(configuration.port)/" }
     private func publishAgentFile() {
         let entry = phoneEntry
         do {
             guard let token = AgentFile.newToken() else { throw NSError(domain: "WindowShare.Agent", code: 2) }
-            try AgentFile.write(port: configuration.port, token: token, entry: entry, entries: configuration.entries())
-            identity.configureAgent(token: token, entry: entry, entries: configuration.entries())
+            try AgentFile.write(port: configuration.port, token: token, entry: entry, entries: phoneEntries)
+            identity.configureAgent(token: token, entry: entry, entries: phoneEntries)
         } catch AgentFile.Failure.ownedByOther(let pid) {
             fputs("[agent] agent.json belongs to running instance pid=\(pid); windowshare-show and status will not see this instance\n", stderr)
         } catch { fputs("[agent] config unavailable\n", stderr) }
@@ -119,7 +120,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         }
         add("打开开发观看页", #selector(openBrowser), to: menu)
         menu.addItem(.separator())
-        let entries = configuration.entries()
+        let entries = phoneEntries
         let link = { (entry: String) in self.selection.map { PairingSession.shareLink(entry, $0) } ?? entry }
         var lines = configuration.proxied ? ["入口：\(link(configuration.origin))"]
             : entries.isEmpty ? ["未找到 Tailscale 或局域网地址：仅本机可访问"] : entries.map { "手机入口：\(link($0))" }
@@ -157,11 +158,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     /// Starts a new share (new link). nil when unavailable or another share holds the Mac-wide lock.
     @discardableResult private func share(_ target: WindowInfo, input: Bool, includeOffscreen: Bool = false, startedAt: TimeInterval? = nil) -> PairingSession.Binding? {
         guard unavailable.isEmpty else { return nil }
+        let previousEntries = phoneEntries
+        resolvedEntries = configuration.proxied ? configuration.entries() : configuration.reachableEntries()
+        guard !phoneEntries.isEmpty else { fputs("[share] no reachable private entry listeners\n", stderr); return nil }
         do { try ShareLock.acquire(owner: "Mac 菜单栏（老板）") } // no-op when this process already holds it (CLI start)
         catch let busy as ShareLock.Busy { print("[share] busy: \(busy.message())"); show("WindowShare", busy.message()); return nil }
         catch { show("WindowShare", "共享锁不可用"); return nil }
         // An idle instance may still own agent.json; the share that holds the lock takes it over (R2).
-        if AgentFile.read()?["pid"] as? Int != Int(getpid()) { publishAgentFile() }
+        if AgentFile.read()?["pid"] as? Int != Int(getpid()) || previousEntries != phoneEntries { publishAgentFile() }
         identity.revokeWindow()
         stopControl()
         let old = capture
